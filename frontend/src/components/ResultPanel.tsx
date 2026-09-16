@@ -1,61 +1,41 @@
 import type { SubmissionResult } from "../types/tax";
+import { RegimeComparisonView } from "./RegimeComparison";
 
-const money = (value?: string) =>
-  new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  }).format(Number(value ?? 0));
-
-const num = (value?: string) => Number(value ?? 0);
-
-const CHECK_LABELS: Record<string, string> = {
-  taxpayer_name: "Taxpayer name",
-  taxpayer_ssn: "Taxpayer SSN",
-  income: "Income present",
-  withholding_bounds: "Withholding bounds",
-  w2_social_security_invariant: "SS withholding check",
-  w2_medicare_invariant: "Medicare withholding check",
-  calculation_replay: "Independent recompute",
-  source_grounding: "Source grounding",
-  params_verified: "Verified tax parameters",
-  completeness: "Completeness",
+const ACTION_SUMMARY: Record<string, string> = {
+  extract_page: "Read document page using OCR and structured text extraction.",
+  form16_extract: "Extracted salary 17(1), exemptions u/s 10, standard deduction, and Chapter VI-A deductions.",
+  form26as_extract: "Extracted TDS on salary, other TDS, and advance tax / SAT challans.",
+  ais_extract: "Parsed Annual Information Statement financial streams and interest entries.",
+  broker_pnl_extract: "Parsed capital gains trading P&L and recomputed holding periods.",
+  compute_income: "Determined gross total income and net deductions across all five statutory heads.",
+  tax_old: "Computed tax liability under the Old Regime with full slab and rebate benefits.",
+  tax_new: "Computed tax liability under Section 115BAC (New Regime) with concessional slabs.",
+  compare: "Selected optimal regime, determined savings, line-by-line deltas, and breakeven threshold.",
+  verify: "Recomputed returns in fresh engines and validated 11 statutory and audit gates.",
+  remediate: "Healed discrepancies (TDS reconciliation, 80C caps, or date corrections).",
+  document: "Generated 8-page CA-grade advisory report and official CBDT ITR JSON payload.",
 };
 
 export function ResultPanel({ result }: { result: SubmissionResult }) {
-  const calc = result.calculation;
   const v = result.verification;
-  const isRefund = num(calc?.refund) >= num(calc?.tax_due);
+  const cmp = result.comparison;
+  const data = result.extracted_data;
   const checks = v?.checks ?? [];
-  const failedChecks = checks.filter((c) => !c.passed);
-  const needsReview =
-    result.status === "manual_review" || result.status === "failed";
-
-  const breakdown: [string, string | undefined, boolean][] = calc
-    ? [
-        ["Total income", calc.total_income ?? calc.gross_income, false],
-        ["Adjustments", calc.adjustments, false],
-        ["Adjusted gross income", calc.adjusted_gross_income, true],
-        ["Deductions", calc.deductions, false],
-        ["QBI deduction", calc.qbi_deduction, false],
-        ["Taxable income", calc.taxable_income, true],
-        ["Tax before credits", calc.income_tax_before_credits, false],
-        ["Credits", calc.nonrefundable_credits, false],
-        ["Other taxes", calc.other_taxes, false],
-        ["Total tax", calc.federal_tax, true],
-        ["Total payments", calc.total_payments, false],
-      ]
-    : [];
 
   return (
     <section className="results">
+      {/* 1. Header & Verification Status */}
       <div className="result-heading">
         <div>
           <span className={`status status-${result.status}`}>
             {result.status.replace("_", " ")}
           </span>
-          <h2>Submission intelligence</h2>
-          <p className="sub-id">{result.submission_id}</p>
+          <h2>Tax Filing Intelligence</h2>
+          <p className="sub-id">
+            PAN: <strong>{data?.masked_pan || data?.pan || "—"}</strong> &nbsp;·&nbsp;
+            AY: <strong>2026-27 (FY 2025-26)</strong> &nbsp;·&nbsp;
+            Ref: <code>{result.submission_id}</code>
+          </p>
         </div>
         {v && (
           <div className="confidence-card">
@@ -63,143 +43,103 @@ export function ResultPanel({ result }: { result: SubmissionResult }) {
               {Math.round(v.confidence_score * 100)}
               <span>%</span>
             </div>
-            <span className="confidence-label">confidence</span>
+            <span className="confidence-label">Confidence</span>
             <div className="verdict-chips">
               <span className={v.correctness_ok ? "chip ok" : "chip bad"}>
-                correctness {v.correctness_ok ? "✓" : "✗"}
+                Correctness {v.correctness_ok ? "✓" : "✗"}
               </span>
               <span className={v.completeness_ok ? "chip ok" : "chip bad"}>
-                completeness {v.completeness_ok ? "✓" : "✗"}
+                Completeness {v.completeness_ok ? "✓" : "✗"}
               </span>
             </div>
           </div>
         )}
       </div>
 
-      {result.error && (
-        <div className="alert" role="alert">
-          {result.error}
-        </div>
-      )}
+      {/* 2. Regime Comparison View */}
+      {cmp && <RegimeComparisonView comparison={cmp} />}
 
-      {needsReview && (
-        <div className="review-box" role="status">
-          <strong>
-            {result.status === "manual_review"
-              ? "Routed to manual review"
-              : "Processing didn’t complete"}
-          </strong>
-          <p>
-            {result.status === "manual_review"
-              ? "Automated checks couldn’t fully verify this return. Review the flagged checks below, correct the source documents, and resubmit."
-              : "The pipeline stopped before finishing. Check the message above, then resubmit your documents."}
+      {/* 3. Action & E-Filing Receipt Box */}
+      {result.receipt && (
+        <div className="receipt-box">
+          <div className="receipt-header">
+            <h3>e-Filing Transmission & Receipt</h3>
+            <span className="chip ok">Ready to File</span>
+          </div>
+          <p className="receipt-meta">
+            Reference No: <strong>{result.receipt.reference_number}</strong> &nbsp;·&nbsp;
+            Channel: <strong>{result.receipt.filing_type || "json_self_file"}</strong> &nbsp;·&nbsp;
+            Form: <strong>{result.receipt.itr_form || "ITR-1"}</strong>
           </p>
-          {failedChecks.length > 0 && (
-            <ul>
-              {failedChecks.map((c) => (
-                <li key={c.name}>
-                  {CHECK_LABELS[c.name] ?? c.name}
-                  {c.message ? ` — ${c.message}` : ""}
-                </li>
-              ))}
-            </ul>
+          {result.receipt.instructions && (
+            <pre className="receipt-instructions">{result.receipt.instructions}</pre>
           )}
+          <div className="download-actions">
+            {result.report_url && (
+              <a
+                href={result.report_url}
+                target="_blank"
+                rel="noreferrer"
+                className="btn-download"
+              >
+                📄 View 8-Page CA Advisory Report (PDF)
+              </a>
+            )}
+            <button
+              type="button"
+              className="btn-download btn-secondary"
+              onClick={() => {
+                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(result, null, 2));
+                const dlAnchorElem = document.createElement("a");
+                dlAnchorElem.setAttribute("href", dataStr);
+                dlAnchorElem.setAttribute("download", `${data?.pan || "ITR"}_Return_AY2026-27.json`);
+                dlAnchorElem.click();
+              }}
+            >
+              📥 Download ITR JSON
+            </button>
+          </div>
         </div>
       )}
 
-      {calc && (
-        <div className="metric-grid">
-          <article className="metric">
-            <span>Taxpayer</span>
-            <strong>{result.extracted_data?.employee_name || "Needs review"}</strong>
-            <small>Tax year {result.extracted_data?.tax_year}</small>
-          </article>
-          <article className="metric">
-            <span>Gross income</span>
-            <strong>{money(calc.total_income ?? calc.gross_income)}</strong>
-            <small>AGI {money(calc.adjusted_gross_income)}</small>
-          </article>
-          <article className="metric">
-            <span>Taxable income</span>
-            <strong>{money(calc.taxable_income)}</strong>
-            <small>{calc.tax_table_used ? "IRS Tax Table" : "Tax Computation Worksheet"}</small>
-          </article>
-          <article className="metric">
-            <span>Federal tax</span>
-            <strong>{money(calc.federal_tax)}</strong>
-            <small>
-              {num(calc.child_tax_credit) > 0 ? `CTC ${money(calc.child_tax_credit)}` : "After credits"}
-            </small>
-          </article>
-          <article className={`metric accent ${isRefund ? "" : "due"}`}>
-            <span>{isRefund ? "Federal refund" : "Balance due"}</span>
-            <strong>{money(isRefund ? calc.refund : calc.tax_due)}</strong>
-            <small>
-              {num(calc.state_refund) > 0
-                ? `State refund ${money(calc.state_refund)}`
-                : num(calc.state_balance_due) > 0
-                  ? `State due ${money(calc.state_balance_due)}`
-                  : result.receipt?.reference_number ?? "Pending verification"}
-            </small>
-          </article>
-        </div>
-      )}
-
-      <div className="panel-row">
-        {calc && (
-          <div className="panel">
-            <h3>Tax breakdown</h3>
-            <dl className="breakdown">
-              {breakdown.map(([label, value, total]) => (
-                <div key={label} className={total ? "bd-row total" : "bd-row"}>
-                  <dt>{label}</dt>
-                  <dd>{money(value)}</dd>
+      {/* 4. Verification Checklist */}
+      {checks.length > 0 && (
+        <div className="checks-section">
+          <h3>Statutory & Computational Integrity Gates</h3>
+          <div className="checks-grid">
+            {checks.map((chk, idx) => (
+              <div key={idx} className={`check-card ${chk.passed ? "check-pass" : "check-fail"}`}>
+                <div className="check-title">
+                  <span>{chk.passed ? "✓" : "✗"}</span>
+                  <strong>{chk.name}</strong>
                 </div>
-              ))}
-              <div className="bd-row result">
-                <dt>{isRefund ? "Refund" : "Balance due"}</dt>
-                <dd>{money(isRefund ? calc.refund : calc.tax_due)}</dd>
+                <p className="check-msg">{chk.message}</p>
               </div>
-            </dl>
+            ))}
           </div>
-        )}
+        </div>
+      )}
 
-        {v && (
-          <div className="panel">
-            <h3>Verification</h3>
-            <ul className="checks">
-              {checks.map((c) => (
-                <li key={c.name} className={c.passed ? "ok" : "bad"}>
-                  <span className="tick">{c.passed ? "✓" : "✗"}</span>
-                  <div>
-                    <strong>{CHECK_LABELS[c.name] ?? c.name}</strong>
-                    {!c.passed && <small>{c.message}</small>}
+      {/* 5. Agent Decision Audit Trail */}
+      {result.audit_trail && result.audit_trail.length > 0 && (
+        <div className="audit-section">
+          <h3>Agent Decision Log & Audit Trail</h3>
+          <div className="timeline">
+            {result.audit_trail.map((entry, idx) => (
+              <div key={idx} className="timeline-item">
+                <div className="timeline-dot" />
+                <div className="timeline-content">
+                  <div className="timeline-top">
+                    <strong>{entry.agent}</strong>
+                    <span className="action-tag">{entry.action}</span>
+                    <small>{new Date(entry.timestamp).toLocaleTimeString()}</small>
                   </div>
-                </li>
-              ))}
-            </ul>
+                  <p>{ACTION_SUMMARY[entry.action] || entry.reason}</p>
+                </div>
+              </div>
+            ))}
           </div>
-        )}
-      </div>
-
-      <div className="audit">
-        <h3>Agent decision log</h3>
-        {result.audit_trail.map((entry, index) => (
-          <div className="audit-row" key={`${entry.timestamp}-${index}`}>
-            <span>{String(index + 1).padStart(2, "0")}</span>
-            <div>
-              <strong>{entry.agent}</strong>
-              <p>{entry.reason}</p>
-            </div>
-            <code>{entry.action}</code>
-          </div>
-        ))}
-      </div>
-
-      {result.report_url && (
-        <a className="download" href={result.report_url}>
-          Download professional report (PDF)
-        </a>
+        </div>
       )}
     </section>
   );

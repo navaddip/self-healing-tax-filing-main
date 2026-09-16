@@ -1,283 +1,415 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.schemas.validators import AgeBand, mask_pan
 
 
-class FilingStatus(StrEnum):
-    SINGLE = "single"
-    MARRIED_JOINTLY = "married_filing_jointly"
-    MARRIED_SEPARATELY = "married_filing_separately"
-    HEAD_OF_HOUSEHOLD = "head_of_household"
-    QUALIFYING_SURVIVING_SPOUSE = "qualifying_surviving_spouse"
+class Regime(StrEnum):
+    OLD = "old"
+    NEW = "new"
+
+
+class ResidentialStatus(StrEnum):
+    RESIDENT_ORDINARY = "resident_ordinary"
+    RESIDENT_NOT_ORDINARY = "resident_not_ordinary"
+    NON_RESIDENT = "non_resident"
+
+
+class ITRForm(StrEnum):
+    ITR1 = "ITR-1"
+    ITR2 = "ITR-2"
+    ITR3 = "ITR-3"
+    ITR4 = "ITR-4"
+
+
+ItrForm = ITRForm
 
 
 class WorkflowStatus(StrEnum):
     UPLOADED = "uploaded"
-    PROCESSING = "processing"
     PARSING = "parsing"
-    CALCULATING = "calculating"
+    COMPUTING_INCOME = "computing_income"
+    CALCULATING_OLD = "calculating_old"
+    CALCULATING_NEW = "calculating_new"
+    COMPARING = "comparing"
     VERIFYING = "verifying"
     REMEDIATING = "remediating"
+    REVIEW_READY = "review_ready"
+    APPROVED = "approved"
     COMPLETED = "completed"
     MANUAL_REVIEW = "manual_review"
     FAILED = "failed"
 
 
-def mask_ssn(value: str) -> str:
-    """Return an SSN with all but the last four digits masked."""
-    digits = re.sub(r"\D", "", value or "")
-    if len(digits) < 4:
-        return "***-**-****" if digits else ""
-    return f"***-**-{digits[-4:]}"
-
-
-class SourceEvidence(BaseModel):
-    field: str
-    page: int = 1
-    raw_text: str = ""
-    source: str = "ocr"
-    confidence: float = Field(default=0.0, ge=0, le=1)
-
-
-class W2(BaseModel):
-    """A single Form W-2. Multiple may be attached to one taxpayer."""
-
-    employer_name: str = ""
-    employer_ein: str = ""
-    box1_wages: Decimal = Decimal("0")
-    box2_federal_withheld: Decimal = Decimal("0")
-    box3_ss_wages: Decimal = Decimal("0")
-    box4_ss_withheld: Decimal = Decimal("0")
-    box5_medicare_wages: Decimal = Decimal("0")
-    box6_medicare_withheld: Decimal = Decimal("0")
-    box17_state_withheld: Decimal = Decimal("0")
-
-    @field_validator(
-        "box1_wages",
-        "box2_federal_withheld",
-        "box3_ss_wages",
-        "box4_ss_withheld",
-        "box5_medicare_wages",
-        "box6_medicare_withheld",
-        "box17_state_withheld",
-        mode="before",
-    )
-    @classmethod
-    def _decimal(cls, value: Any) -> Decimal:
-        return _to_decimal(value)
-
-
 def _to_decimal(value: Any) -> Decimal:
+    """Coerce currency strings and numbers to Decimal."""
     if value in (None, ""):
         return Decimal("0")
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, (int, float)):
+        return Decimal(str(value))
     if isinstance(value, str):
-        value = value.replace("$", "").replace(",", "").strip()
+        # Remove currency symbols (INR ₹, $, Rs., etc.), commas, and whitespace
+        cleaned = re.sub(r"[₹$,\s]|Rs\.?|INR", "", value, flags=re.IGNORECASE).strip()
+        if not cleaned:
+            return Decimal("0")
+        return Decimal(cleaned)
     return Decimal(str(value))
 
 
-class TaxpayerData(BaseModel):
-    # Identity
-    employee_name: str = ""
-    spouse_name: str = ""
-    ssn: str = ""
+class SourceEvidence(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    field: str = Field(..., alias="field_name")
+    page: int = Field(default=1, alias="page_number")
+    raw_text: str = ""
+    source: str = Field(default="ocr", alias="source_document")
+    confidence: float = Field(default=0.0, ge=0, le=1)
+
+
+class Form16(BaseModel):
     employer_name: str = ""
-    filing_status: FilingStatus = FilingStatus.SINGLE
-    tax_year: int = 2025
+    employer_tan: str = ""
+    employer_pan: str = ""
+    certificate_number: str = ""
+    period_from: date | None = None
+    period_to: date | None = None
+    gross_salary_17_1: Decimal = Decimal("0")
+    perquisites_17_2: Decimal = Decimal("0")
+    profits_in_lieu_17_3: Decimal = Decimal("0")
+    exempt_allowances_10: dict[str, Decimal] = Field(default_factory=dict)
+    standard_deduction: Decimal = Decimal("0")
+    professional_tax: Decimal = Decimal("0")
+    entertainment_allowance: Decimal = Decimal("0")
+    chapter_via_claimed: dict[str, Decimal] = Field(default_factory=dict)
+    regime_used: Regime = Regime.NEW
+    tds_deducted: Decimal = Decimal("0")
+    taxable_salary_per_employer: Decimal = Decimal("0")
 
-    # Age / blindness (drive the additional standard deduction)
-    age_65_plus: bool = False
-    spouse_65_plus: bool = False
-    blind: bool = False
-    spouse_blind: bool = False
+    @field_validator(
+        "gross_salary_17_1",
+        "perquisites_17_2",
+        "profits_in_lieu_17_3",
+        "standard_deduction",
+        "professional_tax",
+        "entertainment_allowance",
+        "tds_deducted",
+        "taxable_salary_per_employer",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_decimal(cls, v: Any) -> Decimal:
+        return _to_decimal(v)
 
-    # Dependents
-    qualifying_children: int = 0  # CTC-eligible
-    other_dependents: int = 0  # Credit for Other Dependents
+    @field_validator("exempt_allowances_10", "chapter_via_claimed", mode="before")
+    @classmethod
+    def _coerce_dict_decimals(cls, v: Any) -> dict[str, Decimal]:
+        if not isinstance(v, dict):
+            return {}
+        return {k: _to_decimal(val) for k, val in v.items()}
 
-    # Wage income (aggregated across W-2s)
-    w2s: list[W2] = Field(default_factory=list)
-    wages: Decimal = Decimal("0")
-    federal_tax_withheld: Decimal = Decimal("0")
-    state_tax_withheld: Decimal = Decimal("0")
-    ss_wages: Decimal = Decimal("0")
-    ss_tax_withheld: Decimal = Decimal("0")
-    medicare_wages: Decimal = Decimal("0")
-    medicare_tax_withheld: Decimal = Decimal("0")
-    employer_count: int = 0
 
-    # Other income
-    taxable_interest: Decimal = Decimal("0")
-    tax_exempt_interest: Decimal = Decimal("0")
-    ordinary_dividends: Decimal = Decimal("0")
-    qualified_dividends: Decimal = Decimal("0")
-    long_term_capital_gain: Decimal = Decimal("0")
-    short_term_capital_gain: Decimal = Decimal("0")
-    capital_loss_carryover: Decimal = Decimal("0")  # prior-year loss (positive)
-    self_employment_income: Decimal = Decimal("0")  # net profit (Sch C)
-    partnership_income: Decimal = Decimal("0")  # K-1 ordinary business income
-    taxable_pension_ira: Decimal = Decimal("0")  # 1099-R box 2a
-    social_security_benefits: Decimal = Decimal("0")  # SSA-1099 (gross)
+class SalaryBreakup(BaseModel):
+    basic: Decimal = Decimal("0")
+    dearness_allowance: Decimal = Decimal("0")
+    hra_received: Decimal = Decimal("0")
+    lta_received: Decimal = Decimal("0")
+    other_allowances: Decimal = Decimal("0")
+    rent_paid_annual: Decimal = Decimal("0")
+    landlord_pan: str = ""
+    is_metro: bool = False
+    months_in_service: int = 12
+
+    @field_validator(
+        "basic",
+        "dearness_allowance",
+        "hra_received",
+        "lta_received",
+        "other_allowances",
+        "rent_paid_annual",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_decimal(cls, v: Any) -> Decimal:
+        return _to_decimal(v)
+
+
+class HouseProperty(BaseModel):
+    is_self_occupied: bool = True
+    annual_rent_received: Decimal = Decimal("0")
+    municipal_taxes_paid: Decimal = Decimal("0")
+    interest_on_loan_24b: Decimal = Decimal("0")
+    principal_repaid_80c: Decimal = Decimal("0")
+    is_let_out: bool = False
+    co_owner_share: Decimal = Decimal("1")
+
+    @field_validator(
+        "annual_rent_received",
+        "municipal_taxes_paid",
+        "interest_on_loan_24b",
+        "principal_repaid_80c",
+        "co_owner_share",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_decimal(cls, v: Any) -> Decimal:
+        return _to_decimal(v)
+
+    @property
+    def annual_lettable_value(self) -> Decimal:
+        return self.annual_rent_received
+
+
+class CapitalGainItem(BaseModel):
+    asset_type: Literal[
+        "listed_equity",
+        "equity_mf",
+        "immovable_property",
+        "unlisted_shares",
+        "gold",
+        "debt_mf",
+        "other",
+    ]
+    acquisition_date: date | None = None
+    transfer_date: date | None = None
+    cost_of_acquisition: Decimal = Decimal("0")
+    cost_of_improvement: Decimal = Decimal("0")
+    transfer_expenses: Decimal = Decimal("0")
+    sale_consideration: Decimal = Decimal("0")
+    stt_paid: bool = False
+    is_pre_23jul2024: bool = False
+    holding_days: int = 0
+    is_long_term: bool = False
+    indexed_cost: Decimal = Decimal("0")
+    gain: Decimal = Decimal("0")
+
+    @field_validator(
+        "cost_of_acquisition",
+        "cost_of_improvement",
+        "transfer_expenses",
+        "sale_consideration",
+        "indexed_cost",
+        "gain",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_decimal(cls, v: Any) -> Decimal:
+        return _to_decimal(v)
+
+
+class PresumptiveBusiness(BaseModel):
+    section: Literal["44AD", "44ADA", "44AE"]
+    turnover: Decimal = Decimal("0")
+    digital_receipts: Decimal = Decimal("0")
+    cash_receipts: Decimal = Decimal("0")
+    declared_profit: Decimal = Decimal("0")
+    vehicles: list[dict[str, Any]] | None = None
+
+    @field_validator(
+        "turnover",
+        "digital_receipts",
+        "cash_receipts",
+        "declared_profit",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_decimal(cls, v: Any) -> Decimal:
+        return _to_decimal(v)
+
+
+class TaxesPaid(BaseModel):
+    tds_salary: Decimal = Decimal("0")
+    tds_non_salary: Decimal = Decimal("0")
+    tcs: Decimal = Decimal("0")
+    advance_tax_instalments: dict[str, Decimal] = Field(default_factory=dict)
+    self_assessment_tax: Decimal = Decimal("0")
+    relief_89: Decimal = Decimal("0")
+    relief_90_91: Decimal = Decimal("0")
+
+    @field_validator(
+        "tds_salary",
+        "tds_non_salary",
+        "tcs",
+        "self_assessment_tax",
+        "relief_89",
+        "relief_90_91",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_decimal(cls, v: Any) -> Decimal:
+        return _to_decimal(v)
+
+    @field_validator("advance_tax_instalments", mode="before")
+    @classmethod
+    def _coerce_dict_decimals(cls, v: Any) -> dict[str, Decimal]:
+        if not isinstance(v, dict):
+            return {}
+        return {k: _to_decimal(val) for k, val in v.items()}
+
+
+class IndianTaxpayerData(BaseModel):
+    # Identity
+    name: str = ""
+    pan: str = ""
+    aadhaar_last4: str = ""
+    date_of_birth: date | None = None
+    residential_status: ResidentialStatus = ResidentialStatus.RESIDENT_ORDINARY
+    age_band: AgeBand = AgeBand.BELOW_60
+    email: str = ""
+    mobile: str = ""
+    address: str = ""
+    bank_account_last4: str = ""
+    bank_ifsc: str = ""
+    assessment_year: str = "2026-27"
+    financial_year: str = "2025-26"
+
+    # Facts by head
+    form16s: list[Form16] = Field(default_factory=list)
+    salary_breakup: SalaryBreakup | None = None
+    house_properties: list[HouseProperty] = Field(default_factory=list)
+    capital_gains: list[CapitalGainItem] = Field(default_factory=list)
+    presumptive: PresumptiveBusiness | None = None
+
+    savings_interest: Decimal = Decimal("0")
+    fd_interest: Decimal = Decimal("0")
+    dividend_income: Decimal = Decimal("0")
+    family_pension: Decimal = Decimal("0")
     other_income: Decimal = Decimal("0")
+    winnings_115bb: Decimal = Decimal("0")
+    exempt_income: Decimal = Decimal("0")
+    agricultural_income: Decimal = Decimal("0")
 
-    # Adjustments / deductions / payments
-    adjustments: Decimal = Decimal("0")  # above-the-line (Sch 1 Part II)
-    itemized_deductions: Decimal = Decimal("0")  # pre-computed total (fallback)
-    # Schedule A line items (used to compute itemized + AMT SALT add-back).
-    salt_paid: Decimal = Decimal("0")  # state/local taxes (before $10k cap)
-    mortgage_interest: Decimal = Decimal("0")
-    medical_expenses: Decimal = Decimal("0")
-    charitable_contributions: Decimal = Decimal("0")
-    estimated_payments: Decimal = Decimal("0")
+    # Deduction claims (raw claims)
+    deduction_claims: dict[str, Decimal] = Field(default_factory=dict)
+    taxes_paid: TaxesPaid = Field(default_factory=TaxesPaid)
+    brought_forward_losses: dict[str, Decimal] = Field(default_factory=dict)
 
-    # Credits & AMT inputs
-    qualified_tuition: Decimal = Decimal("0")  # education credits
-    aotc_students: int = 0  # students eligible for American Opportunity Credit
-    retirement_contributions: Decimal = Decimal("0")  # Saver's Credit
-    amt_preference_items: Decimal = Decimal("0")  # ISO bargain element, PAB, etc.
-
-    # State (intentionally simplistic -- see note in tax_calculator)
-    state_tax_rate: Decimal = Decimal("0")
-    state: str = ""
-
+    # Provenance
     evidence: list[SourceEvidence] = Field(default_factory=list)
     field_confidence: dict[str, float] = Field(default_factory=dict)
 
     @field_validator(
-        "wages",
-        "federal_tax_withheld",
-        "state_tax_withheld",
-        "ss_wages",
-        "ss_tax_withheld",
-        "medicare_wages",
-        "medicare_tax_withheld",
-        "taxable_interest",
-        "tax_exempt_interest",
-        "ordinary_dividends",
-        "qualified_dividends",
-        "long_term_capital_gain",
-        "short_term_capital_gain",
-        "capital_loss_carryover",
-        "self_employment_income",
-        "partnership_income",
-        "taxable_pension_ira",
-        "social_security_benefits",
+        "savings_interest",
+        "fd_interest",
+        "dividend_income",
+        "family_pension",
         "other_income",
-        "adjustments",
-        "itemized_deductions",
-        "salt_paid",
-        "mortgage_interest",
-        "medical_expenses",
-        "charitable_contributions",
-        "estimated_payments",
-        "qualified_tuition",
-        "retirement_contributions",
-        "amt_preference_items",
-        "state_tax_rate",
+        "winnings_115bb",
+        "exempt_income",
+        "agricultural_income",
         mode="before",
     )
     @classmethod
-    def normalize_decimal(cls, value: Any) -> Decimal:
-        return _to_decimal(value)
+    def _coerce_decimal(cls, v: Any) -> Decimal:
+        return _to_decimal(v)
+
+    @field_validator(
+        "deduction_claims", "brought_forward_losses", mode="before"
+    )
+    @classmethod
+    def _coerce_dict_decimals(cls, v: Any) -> dict[str, Decimal]:
+        if not isinstance(v, dict):
+            return {}
+        return {k: _to_decimal(val) for k, val in v.items()}
 
     @property
-    def masked_ssn(self) -> str:
-        return mask_ssn(self.ssn)
+    def masked_pan(self) -> str:
+        return mask_pan(self.pan)
 
-    def aggregate_w2s(self) -> None:
-        """Fold the ``w2s`` list into the scalar wage/withholding totals.
-
-        Only runs when W-2 line items are present, so single-document
-        extraction that populates the scalar fields directly is unaffected.
-        """
-        if not self.w2s:
-            return
-        self.wages = sum((w.box1_wages for w in self.w2s), Decimal("0"))
-        self.federal_tax_withheld = sum(
-            (w.box2_federal_withheld for w in self.w2s), Decimal("0")
-        )
-        self.ss_wages = sum((w.box3_ss_wages for w in self.w2s), Decimal("0"))
-        self.ss_tax_withheld = sum(
-            (w.box4_ss_withheld for w in self.w2s), Decimal("0")
-        )
-        self.medicare_wages = sum(
-            (w.box5_medicare_wages for w in self.w2s), Decimal("0")
-        )
-        self.medicare_tax_withheld = sum(
-            (w.box6_medicare_withheld for w in self.w2s), Decimal("0")
-        )
-        self.state_tax_withheld = sum(
-            (w.box17_state_withheld for w in self.w2s), Decimal("0")
-        )
-        self.employer_count = len(self.w2s)
+    def aggregate_form16s(self) -> None:
+        """Fold multiple Form 16s into salary totals and taxes paid."""
+        total_tds = sum((f.tds_deducted for f in self.form16s), Decimal("0"))
+        if total_tds > Decimal("0"):
+            self.taxes_paid.tds_salary = total_tds
 
 
-class TaxCalculation(BaseModel):
-    # --- Income / AGI ---
-    gross_income: Decimal  # total income (kept name for report/UI compat)
+# Alias for compatibility with existing imports
+TaxpayerData = IndianTaxpayerData
+
+
+class HeadwiseIncome(BaseModel):
+    regime: Regime
+    gross_salary: Decimal = Decimal("0")
+    exempt_allowances: Decimal = Decimal("0")
+    standard_deduction: Decimal = Decimal("0")
+    professional_tax: Decimal = Decimal("0")
+    income_from_salary: Decimal = Decimal("0")
+    house_property_income: Decimal = Decimal("0")
+    hp_loss_set_off: Decimal = Decimal("0")
+    hp_loss_carried_forward: Decimal = Decimal("0")
+    business_income: Decimal = Decimal("0")
+    stcg_111a: Decimal = Decimal("0")
+    stcg_slab: Decimal = Decimal("0")
+    ltcg_112a_gross: Decimal = Decimal("0")
+    ltcg_112a_exempt: Decimal = Decimal("0")
+    ltcg_112a_taxable: Decimal = Decimal("0")
+    ltcg_112: Decimal = Decimal("0")
+    capital_gains_total: Decimal = Decimal("0")
+    other_sources_income: Decimal = Decimal("0")
+    gross_total_income: Decimal = Decimal("0")
+    chapter_via: dict[str, Decimal] = Field(default_factory=dict)
+    chapter_via_total: Decimal = Decimal("0")
     total_income: Decimal = Decimal("0")
-    taxable_social_security: Decimal = Decimal("0")
-    capital_loss_carryforward: Decimal = Decimal("0")
-    adjustments: Decimal = Decimal("0")
-    adjusted_gross_income: Decimal = Decimal("0")
-
-    # --- Deductions ---
-    standard_deduction: Decimal
-    additional_standard_deduction: Decimal = Decimal("0")
-    senior_deduction: Decimal = Decimal("0")
-    deductions: Decimal  # the amount actually used (max of std-stack vs itemized)
-    qbi_deduction: Decimal = Decimal("0")  # Form 8995 (simplified)
-    taxable_income: Decimal
-
-    # --- Income tax (ordinary + preferential) ---
-    ordinary_taxable_income: Decimal = Decimal("0")
-    ordinary_tax: Decimal = Decimal("0")
-    preferential_tax: Decimal = Decimal("0")  # qualified div + net LTCG
-    income_tax_before_credits: Decimal = Decimal("0")
-    tax_table_used: bool = False
-
-    # --- Credits (nonrefundable) ---
-    child_tax_credit: Decimal = Decimal("0")
-    other_dependent_credit: Decimal = Decimal("0")
-    education_credits: Decimal = Decimal("0")  # nonrefundable AOTC + LLC
-    savers_credit: Decimal = Decimal("0")
-    nonrefundable_credits: Decimal = Decimal("0")
-
-    # --- Other federal taxes ---
-    self_employment_tax: Decimal = Decimal("0")
-    additional_medicare_tax: Decimal = Decimal("0")
-    net_investment_income_tax: Decimal = Decimal("0")
-    alternative_minimum_tax: Decimal = Decimal("0")
-    other_taxes: Decimal = Decimal("0")
-
-    # --- Totals ---
-    federal_tax: Decimal  # total federal tax after credits + other taxes
-    state_tax: Decimal
-    total_tax: Decimal  # federal + state (kept name for report/UI compat)
-
-    # --- Payments ---
-    total_withholding: Decimal  # federal + state withholding (report/UI compat)
-    estimated_payments: Decimal = Decimal("0")
-    excess_ss_credit: Decimal = Decimal("0")
-    refundable_child_tax_credit: Decimal = Decimal("0")
-    earned_income_credit: Decimal = Decimal("0")
-    refundable_education_credit: Decimal = Decimal("0")  # refundable AOTC
-    total_payments: Decimal = Decimal("0")
-
-    # --- Result (federal) ---
-    refund: Decimal
-    tax_due: Decimal
-    # State shown separately (only meaningful when a state rate is supplied).
-    state_refund: Decimal = Decimal("0")
-    state_balance_due: Decimal = Decimal("0")
-
-    params_verified: bool = True
     trace: list[str] = Field(default_factory=list)
+
+    @property
+    def salary_income(self) -> Decimal:
+        return self.income_from_salary
+
+    @property
+    def salary_standard_deduction(self) -> Decimal:
+        return self.standard_deduction
+
+    @property
+    def salary_professional_tax(self) -> Decimal:
+        return self.professional_tax
+
+
+class RegimeTaxResult(BaseModel):
+    regime: Regime
+    income: HeadwiseIncome
+    tax_on_slab_income: Decimal = Decimal("0")
+    tax_on_special_income: Decimal = Decimal("0")
+    tax_before_rebate: Decimal = Decimal("0")
+    rebate_87a: Decimal = Decimal("0")
+    marginal_relief_87a: Decimal = Decimal("0")
+    tax_after_rebate: Decimal = Decimal("0")
+    surcharge: Decimal = Decimal("0")
+    surcharge_marginal_relief: Decimal = Decimal("0")
+    cess: Decimal = Decimal("0")
+    total_tax_liability: Decimal = Decimal("0")
+    taxes_paid_total: Decimal = Decimal("0")
+    interest_234a: Decimal = Decimal("0")
+    interest_234b: Decimal = Decimal("0")
+    interest_234c: Decimal = Decimal("0")
+    fee_234f: Decimal = Decimal("0")
+    refund_due: Decimal = Decimal("0")
+    tax_payable: Decimal = Decimal("0")
+    effective_tax_rate: Decimal = Decimal("0")
+    trace: list[str] = Field(default_factory=list)
+
+
+class RegimeComparison(BaseModel):
+    old: RegimeTaxResult
+    new: RegimeTaxResult
+    recommended: Regime
+    savings: Decimal = Decimal("0")
+    savings_pct: Decimal = Decimal("0")
+    deltas: list[dict[str, Any]] = Field(default_factory=list)
+    deductions_forfeited_if_new: dict[str, Decimal] = Field(default_factory=dict)
+    breakeven_deduction_amount: Decimal = Decimal("0")
+    unused_80c_headroom: Decimal = Decimal("0")
+    switch_allowed_annually: bool = True
+    form_10iea_required: bool = False
+    reasons: list[str] = Field(default_factory=list)
 
 
 class VerificationCheck(BaseModel):
@@ -313,16 +445,40 @@ class FilingReceipt(BaseModel):
     reference_number: str
     timestamp: datetime
     filing_status: str
+    filing_type: str = "json_self_file"
+    itr_form: str = "ITR-1"
+    regime: str = "new"
+    payload_hash: str | None = None
+    acknowledgement_id: str | None = None
+    instructions: str | None = None
 
 
 class SubmissionResult(BaseModel):
     submission_id: str
     status: WorkflowStatus
     original_filename: str
-    extracted_data: TaxpayerData | None = None
-    calculation: TaxCalculation | None = None
+    extracted_data: IndianTaxpayerData | None = None
+    comparison: RegimeComparison | None = None
     verification: VerificationResult | None = None
     audit_trail: list[AuditEntry] = Field(default_factory=list)
     receipt: FilingReceipt | None = None
     report_url: str | None = None
     error: str | None = None
+
+
+# Backwards compatibility aliases
+TaxpayerData = IndianTaxpayerData
+TaxCalculation = RegimeTaxResult
+W2 = Form16
+
+
+class FilingStatus(StrEnum):
+    INDIVIDUAL = "individual"
+    SINGLE = "single"
+    MARRIED_JOINT = "married_joint"
+    MARRIED_JOINTLY = "married_jointly"
+    MARRIED_SEPARATE = "married_separate"
+    MARRIED_SEPARATELY = "married_separately"
+    HEAD_OF_HOUSEHOLD = "head_of_household"
+    QUALIFYING_SURVIVING_SPOUSE = "qualifying_surviving_spouse"
+    QUALIFYING_WIDOW = "qualifying_widow"

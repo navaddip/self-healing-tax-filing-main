@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    app_name: str = "Self-Healing Tax Filing System"
+    app_name: str = "Self-Healing Tax Filing System (India)"
     api_prefix: str = "/api/v1"
     database_url: str = "sqlite:///./tax_filing.db"
     ollama_base_url: str = "http://localhost:11434"
@@ -15,14 +15,12 @@ class Settings(BaseSettings):
     storage_root: Path = Path("../storage")
     verification_threshold: float = 0.95
     max_remediation_attempts: int = 2
-    # State income tax is intentionally opt-in: a single flat rate cannot model
-    # 40+ state systems honestly, so it stays 0 unless explicitly configured.
-    default_state_tax_rate: float = 0.0
-    # E-file boundary: no public IRS API exists. "pdf" produces a self-file
-    # package; "mock_transmitter" simulates a commercial MeF transmitter.
-    efile_backend: str = "pdf"
-    # W-2 extractor: "label" (offline parser) or "azure" (Document Intelligence).
-    w2_extractor: str = "label"
+    tax_year: str = "2025-26"
+    default_regime: str = "new"
+    efile_backend: str = "json_self_file"
+    form16_extractor: str = "label"
+    enable_indexation_option: bool = True
+    pan_masking: bool = True
     azure_di_endpoint: str = ""
     azure_di_key: str = ""
     tesseract_cmd: str | None = None

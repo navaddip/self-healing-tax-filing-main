@@ -3,14 +3,19 @@ import json
 from sqlalchemy.orm import Session
 
 from app.models.submission import SubmissionRecord
-from app.schemas import mask_ssn
+from app.schemas import mask_pan, mask_ssn
 
 
 def _redact(state: dict) -> dict:
-    """Never persist a full SSN: store only the masked form."""
+    """Never persist a full PAN or SSN: store only the masked form."""
     extracted = state.get("extracted_data")
-    if isinstance(extracted, dict) and extracted.get("ssn"):
-        state = {**state, "extracted_data": {**extracted, "ssn": mask_ssn(extracted["ssn"])}}
+    if isinstance(extracted, dict):
+        new_extracted = dict(extracted)
+        if new_extracted.get("ssn"):
+            new_extracted["ssn"] = mask_ssn(new_extracted["ssn"])
+        if new_extracted.get("pan"):
+            new_extracted["pan"] = mask_pan(new_extracted["pan"])
+        state = {**state, "extracted_data": new_extracted}
     return state
 
 

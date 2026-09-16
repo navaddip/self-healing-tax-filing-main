@@ -14,5 +14,11 @@ storage/chroma/
 !storage/previews/.gitkeep
 !storage/generated/.gitkeep
 
+# Local generated reports, presentation builds and validation artifacts
+output/
+.codex-finalizer/
+.chart-data-*/
+.deepeval/
+
 # OS cruft
 .DS_Store

@@ -10,6 +10,11 @@ class TaxWorkflowState(TypedDict, total=False):
     status: str
     extracted_data: dict[str, Any]
     raw_text: str
+    computed_income_old: dict[str, Any]
+    computed_income_new: dict[str, Any]
+    result_old: dict[str, Any]
+    result_new: dict[str, Any]
+    comparison: dict[str, Any]
     calculation: dict[str, Any]
     verification: dict[str, Any]
     audit_trail: list[dict[str, Any]]

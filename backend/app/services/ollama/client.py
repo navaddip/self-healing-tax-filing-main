@@ -65,10 +65,12 @@ OCR text follows:
             parsed = json.loads(content)
             return parsed if isinstance(parsed, dict) else {}
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code >= 500:
-                self._vision_disabled_reason = exc.response.text[:500]
+            self._vision_disabled_reason = exc.response.text[:500]
             return {}
-        except (httpx.HTTPError, KeyError, json.JSONDecodeError):
+        except httpx.HTTPError as exc:
+            self._vision_disabled_reason = str(exc)[:500]
+            return {}
+        except (KeyError, json.JSONDecodeError):
             return {}
 
     def classify_remediation(self, errors: list[str]) -> dict[str, Any]:

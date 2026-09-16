@@ -1,60 +1,54 @@
-import { useEffect, useState } from "react";
-
 const agents = [
-  ["01", "Reading", "OCR + vision"],
-  ["02", "Tax Processing", "Rule engine"],
-  ["03", "Verification", "Confidence"],
-  ["04", "Remediation", "Self-healing"],
-  ["05", "Documentation", "PDF report"],
+  ["01", "Reading", "Form 16 / 26AS / AIS"],
+  ["02", "Income Computation", "5 Heads of Income"],
+  ["03", "Dual Tax Engines", "Old & New Parallel"],
+  ["04", "Regime Comparison", "Optimal Selection"],
+  ["05", "Verification", "11 Integrity Gates"],
+  ["06", "Remediation", "Self-Healing TDS"],
+  ["07", "Advisory Report", "8-Page CA Report"],
+  ["08", "E-Filing Boundary", "ITR JSON & Receipt"],
 ];
 
-// The backend persists a single "processing" status until the run is terminal,
-// so we show an indeterminate scanner (not a faked per-stage stepper).
 const RUNNING = new Set([
-  "processing",
   "parsing",
-  "calculating",
+  "computing_income",
+  "calculating_old",
+  "calculating_new",
+  "comparing",
   "verifying",
   "remediating",
 ]);
 
 export function AgentPipeline({ status }: { status?: string }) {
   const running = !!status && RUNNING.has(status);
-  const done = status === "completed";
+  const done = status === "completed" || status === "approved";
   const halted = status === "manual_review" || status === "failed";
-  const [cursor, setCursor] = useState(0);
-
-  useEffect(() => {
-    if (!running) return;
-    const id = setInterval(
-      () => setCursor((c) => (c + 1) % agents.length),
-      1600,
-    );
-    return () => clearInterval(id);
-  }, [running]);
 
   return (
     <section
-      className={`pipeline${running ? " running" : ""}${halted ? " halted" : ""}`}
+      className="pipeline-wrap"
       aria-label="Agent workflow"
       aria-live="polite"
     >
-      {agents.map(([number, title, subtitle], index) => {
-        const cls = done
-          ? "active"
-          : running && index === cursor
-            ? "scan"
-            : "";
-        return (
-          <div className={`agent-card ${cls}`} key={title}>
+      <div
+        className={`pipeline${running ? " running" : ""}${halted ? " halted" : ""}`}
+      >
+        {agents.map(([number, title, subtitle]) => (
+          <div className={`agent-card ${done ? "active" : ""}`} key={title}>
             <span className="agent-number">{number}</span>
             <div>
               <strong>{title}</strong>
-              <small>{cls === "scan" ? "working…" : subtitle}</small>
+              <small>{subtitle}</small>
             </div>
           </div>
-        );
-      })}
+        ))}
+      </div>
+      {running && (
+        <div className="pipeline-status" role="status">
+          <div className="pipeline-bar" aria-hidden="true" />
+          <small>Agents processing — parsing, computing heads, running dual engines, and verifying…</small>
+        </div>
+      )}
     </section>
   );
 }

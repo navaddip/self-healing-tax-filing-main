@@ -1,142 +1,137 @@
-"""Versioned federal tax parameters.
+"""Versioned Indian income tax parameters.
 
 Every numeric constant the engine relies on lives in a ``TaxYearParams`` value
-that carries its own provenance (``source`` + ``verified``).  Constants must
-never be invented by the LLM and must be traceable to an IRS publication so a
-reviewer can confirm they are current.
-
-``verified=False`` means "transcribed from the cited source but not yet
-double-checked against the published PDF in this environment" -- treat those
-returns as advisory until a maintainer flips the flag after verification.
+that carries its own provenance (``source`` + ``verified``). Constants must
+never be authored by an LLM and must be traceable to statutory provisions of
+the Income-tax Act, 1961 (and Income-tax Act, 2025).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 
-from app.schemas import FilingStatus
-
+from app.schemas.tax import AgeBand, Regime
 
 Bracket = tuple[Decimal | None, Decimal]
 
 
-@dataclass(frozen=True)
-class CreditParams:
-    """Child Tax Credit / Credit for Other Dependents parameters."""
+def progressive_tax(amount: Decimal, brackets: list[Bracket]) -> Decimal:
+    """Exact progressive tax on ``amount`` over ascending ``(upper, rate)`` bands.
 
-    ctc_per_child: Decimal
-    ctc_refundable_cap: Decimal  # max refundable (Additional CTC) per child
-    odc_per_dependent: Decimal
-    phaseout_start: dict[FilingStatus, Decimal]
-    phaseout_per_1000: Decimal  # credit reduction per $1,000 over the threshold
-
-
-@dataclass(frozen=True)
-class EitcTier:
-    """Earned Income Tax Credit parameters for a given number of children."""
-
-    credit_rate: Decimal
-    earned_income_amount: Decimal  # income at which the credit plateaus
-    max_credit: Decimal
-    phaseout_begin_other: Decimal  # single / HoH / QSS
-    phaseout_begin_mfj: Decimal
-    phaseout_rate: Decimal
-
-
-@dataclass(frozen=True)
-class EitcParams:
-    investment_income_limit: Decimal
-    # Keyed by number of qualifying children: 0, 1, 2, 3 (3 = "3 or more").
-    tiers: dict[int, EitcTier]
-
-
-@dataclass(frozen=True)
-class AmtParams:
-    """Alternative Minimum Tax (Form 6251)."""
-
-    exemption: dict[FilingStatus, Decimal]
-    phaseout_start: dict[FilingStatus, Decimal]  # exemption phases out at 25%
-    rate_28_threshold: Decimal  # AMTI over this is taxed at 28% (half for MFS)
-
-
-@dataclass(frozen=True)
-class EducationCreditParams:
-    """American Opportunity Credit and Lifetime Learning Credit."""
-
-    aotc_max_per_student: Decimal  # 2,500
-    aotc_refundable_rate: Decimal  # 0.40
-    llc_rate: Decimal  # 0.20
-    llc_expense_cap: Decimal  # 10,000
-    # MAGI phase-out (start, end) by filing status; absent = ineligible (MFS).
-    phaseout: dict[FilingStatus, tuple[Decimal, Decimal]]
-
-
-@dataclass(frozen=True)
-class SaversCreditParams:
-    """Retirement Savings Contributions Credit (Form 8880)."""
-
-    contribution_cap: Decimal  # 2,000 per person
-    # Ordered (agi_ceiling, rate) tiers by filing status; first match wins.
-    tiers: dict[FilingStatus, list[tuple[Decimal, Decimal]]]
-
-
-@dataclass(frozen=True)
-class PreferentialRates:
-    """0/15/20% break-points for qualified dividends and net LTCG.
-
-    Values are the upper bound of *taxable income* for the 0% and 15% bands.
+    The final band must be open (``upper is None``).
     """
+    tax = Decimal("0")
+    lower = Decimal("0")
+    for upper, rate in brackets:
+        if amount <= lower:
+            break
+        band_top = amount if upper is None else min(amount, upper)
+        tax += (band_top - lower) * rate
+        if upper is None or amount <= upper:
+            break
+        lower = upper
+    return tax
 
-    zero_rate_max: dict[FilingStatus, Decimal]
-    fifteen_rate_max: dict[FilingStatus, Decimal]
+
+@dataclass(frozen=True)
+class RegimeParams:
+    slabs: dict[AgeBand, list[tuple[Decimal | None, Decimal]]]
+    standard_deduction: Decimal
+    family_pension_deduction: Decimal
+    rebate_limit: Decimal  # total income ceiling for 87A
+    rebate_max: Decimal
+    rebate_marginal_relief: bool
+    allowed_chapter_via: frozenset[str]
+    allows_hra: bool
+    allows_lta: bool
+    allows_professional_tax: bool
+    allows_sop_interest_24b: bool
+    allows_hp_loss_setoff: bool
+    employer_nps_limit_pct: Decimal  # 0.14 new, 0.10 old (private employees)
+
+
+@dataclass(frozen=True)
+class SurchargeParams:
+    bands: list[tuple[Decimal | None, Decimal]]  # (total income upper, rate)
+    special_income_cap: Decimal  # 0.15
+    marginal_relief: bool = True
+
+
+@dataclass(frozen=True)
+class CapitalGainParams:
+    stcg_111a_rate: Decimal
+    ltcg_112a_rate: Decimal
+    ltcg_112a_exemption: Decimal
+    ltcg_112_rate: Decimal
+    ltcg_112_indexed_rate: Decimal
+    winnings_115bb_rate: Decimal
+    holding_months: dict[str, int]
+    cii: dict[int, int]
+    indexation_option_cutoff: date
+
+
+@dataclass(frozen=True)
+class ChapterVIALimits:
+    limits: dict[str, Decimal]
+    senior_variants: dict[str, Decimal]
+    combined_ceilings: dict[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True)
+class InterestParams:
+    rate_234a: Decimal
+    rate_234b: Decimal
+    rate_234c: Decimal
+    fee_234f_high: Decimal
+    fee_234f_low: Decimal
+    fee_234f_income_threshold: Decimal
+    refund_interest_244a: Decimal
+    advance_tax_schedule: list[tuple[str, Decimal, Decimal]]
+    advance_tax_threshold: Decimal
 
 
 @dataclass(frozen=True)
 class TaxYearParams:
     year: int
+    financial_year: str
+    assessment_year: str
+    regimes: dict[Regime, RegimeParams]
+    surcharge: dict[Regime, SurchargeParams]
+    cess_rate: Decimal
+    capital_gains: CapitalGainParams
+    chapter_via: ChapterVIALimits
+    interest: InterestParams
     source: str
     verified: bool
-    standard_deductions: dict[FilingStatus, Decimal]
-    # Additional standard deduction per "box" for age 65+ or blindness.
-    additional_std_married: Decimal
-    additional_std_unmarried: Decimal
-    brackets: dict[FilingStatus, list[Bracket]]
-    preferential: PreferentialRates
-    credits: CreditParams
-    ss_wage_base: Decimal
-    ss_rate: Decimal
-    medicare_rate: Decimal
-    addl_medicare_rate: Decimal
-    addl_medicare_threshold: dict[FilingStatus, Decimal]
-    niit_rate: Decimal
-    niit_threshold: dict[FilingStatus, Decimal]
-    se_net_factor: Decimal  # 0.9235 (1 - 7.65%)
-    se_combined_rate: Decimal  # 0.153 (12.4% OASDI + 2.9% Medicare)
-    qbi_rate: Decimal  # 0.20 Qualified Business Income deduction rate
-    eitc: EitcParams | None = None
-    amt: AmtParams | None = None
-    education: EducationCreditParams | None = None
-    savers: SaversCreditParams | None = None
-    # OBBBA senior bonus deduction (2025-2028); None if not in effect.
-    senior_deduction: Decimal | None = None
-    senior_deduction_phaseout_start: dict[FilingStatus, Decimal] | None = None
-    senior_deduction_phaseout_rate: Decimal | None = None
+    section_map: dict[str, str] = field(default_factory=dict)
 
 
-_REGISTRY: dict[int, TaxYearParams] = {}
+_REGISTRY: dict[str | int, TaxYearParams] = {}
 
 
 def register(params: TaxYearParams) -> TaxYearParams:
     _REGISTRY[params.year] = params
+    _REGISTRY[params.financial_year] = params
     return params
 
 
-def get_params(year: int) -> TaxYearParams:
-    if year not in _REGISTRY:
-        installed = ", ".join(str(y) for y in sorted(_REGISTRY)) or "none"
-        raise ValueError(
-            f"No federal tax parameters installed for {year} "
-            f"(installed years: {installed})."
-        )
-    return _REGISTRY[year]
+def get_params(year: int | str) -> TaxYearParams:
+    if year in _REGISTRY:
+        return _REGISTRY[year]
+    # Try normalization, e.g. "2025" -> 2025 or 2025 -> "2025-26"
+    try:
+        y_int = int(str(year).split("-")[0])
+        if y_int in _REGISTRY:
+            return _REGISTRY[y_int]
+    except (ValueError, TypeError):
+        pass
+
+    installed = ", ".join(str(y) for y in sorted(k for k in _REGISTRY if isinstance(k, str))) or "none"
+    raise ValueError(
+        f"No tax parameters installed for {year} (installed years: {installed})."
+    )
+
+
+TaxParams = TaxYearParams

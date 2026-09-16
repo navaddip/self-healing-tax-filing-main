@@ -15,6 +15,8 @@ without touching the rest of the pipeline.
 
 from app.services.efile.backends import (
     EFileBackend,
+    JsonSelfFileBackend,
+    MockEriBackend,
     MockTransmitterBackend,
     PdfSelfFileBackend,
     SubmissionAck,
@@ -23,6 +25,8 @@ from app.services.efile.backends import (
 
 __all__ = [
     "EFileBackend",
+    "JsonSelfFileBackend",
+    "MockEriBackend",
     "MockTransmitterBackend",
     "PdfSelfFileBackend",
     "SubmissionAck",

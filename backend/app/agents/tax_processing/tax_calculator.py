@@ -16,7 +16,12 @@ import math
 from decimal import Decimal, ROUND_HALF_UP
 
 from app.schemas import FilingStatus, TaxCalculation, TaxpayerData
-from app.tax_rules.params import Bracket, TaxYearParams, get_params
+from app.tax_rules.params import (
+    Bracket,
+    TaxYearParams,
+    get_params,
+    progressive_tax,
+)
 
 
 ZERO = Decimal("0")
@@ -30,17 +35,7 @@ def dollars(value: Decimal) -> Decimal:
 
 def _bracket_formula(amount: Decimal, brackets: list[Bracket]) -> Decimal:
     """Exact progressive tax on ``amount`` (the Tax Computation Worksheet)."""
-    tax = ZERO
-    lower = ZERO
-    for upper, rate in brackets:
-        if amount <= lower:
-            break
-        band_top = amount if upper is None else min(amount, upper)
-        tax += (band_top - lower) * rate
-        if upper is None or amount <= upper:
-            break
-        lower = upper
-    return tax
+    return progressive_tax(amount, brackets)
 
 
 def tax_liability(amount: Decimal, params: TaxYearParams, fs: FilingStatus) -> Decimal:
@@ -536,12 +531,28 @@ class TaxCalculator:
         if eitc:
             trace.append(f"Earned Income Tax Credit (refundable): {eitc}")
 
-        # --- State tax (deliberately simple; only when a rate is supplied) ---
-        state_tax = (
-            dollars(taxable_income * data.state_tax_rate)
-            if data.state_tax_rate > 0
-            else ZERO
-        )
+        # --- State tax: installed per-state rule pack first, then the flat-rate
+        # fallback. A pack models real state law and overrides the supplied
+        # flat rate; absent a pack, state_tax_rate (default 0) is used. ---
+        state_tax = ZERO
+        pack = get_state_pack(data.state, data.tax_year)
+        if pack is not None:
+            federal_ctx = FederalContext(
+                filing_status=fs,
+                agi=agi,
+                taxable_income=taxable_income,
+                taxable_social_security=taxable_ss,
+            )
+            state_result = pack.compute(data, federal_ctx)
+            state_tax = dollars(state_result.tax)
+            trace.extend(state_result.trace)
+            if not pack.verified:
+                trace.append(
+                    f"[unverified] {pack.state} {pack.year} state pack: {pack.source}"
+                )
+        elif data.state_tax_rate > 0:
+            state_tax = dollars(taxable_income * data.state_tax_rate)
+            trace.append(f"State tax (flat {data.state_tax_rate}): {state_tax}")
 
         # --- Payments ---
         max_ss = dollars(params.ss_wage_base * params.ss_rate)

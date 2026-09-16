@@ -72,8 +72,8 @@ export default function App() {
     <main>
       <nav>
         <div className="brand">
-          <span>TF</span>
-          <strong>TaxFlow Local</strong>
+          <span>IN</span>
+          <strong>TaxFlow India · AY 2026-27</strong>
         </div>
         <div className="nav-right">
           {(result || busy) && (
@@ -86,27 +86,27 @@ export default function App() {
               {busy ? "Running…" : "Start over"}
             </button>
           )}
-          <div className="local-badge">Local-first · auditable by design</div>
+          <div className="local-badge">AY 2026-27 · Section 115BAC · Auditable</div>
         </div>
       </nav>
 
       <header className="hero">
-        <div className="eyebrow">Self-healing filing intelligence</div>
-        <h1>Tax documents in.<br />Verified answers out.</h1>
+        <div className="eyebrow">Self-Healing Indian Income Tax Advisory</div>
+        <h1>Indian Tax Documents In.<br />Optimal Regime & ITR Out.</h1>
         <p>
-          Five agents extract, calculate, challenge, repair, and document every
-          decision — on a deterministic 2025 tax engine with a grounded,
-          verifiable audit trail.
+          Eight specialized agents extract Form 16, 26AS, and AIS, compute 5 statutory income heads,
+          run dual tax engines (Old vs New Sec 115BAC) in parallel, heal discrepancies, and generate
+          an 8-page CA advisory report with official ITR JSON.
         </p>
       </header>
 
-      <AgentPipeline status={busy ? "processing" : result?.status} />
+      <AgentPipeline status={busy ? "computing_income" : result?.status} />
 
       <section className="workspace">
         <form className="upload-card" onSubmit={handleSubmit}>
           <div className="upload-icon">↑</div>
-          <h2>Start a filing run</h2>
-          <p>Upload your W-2 plus any 1099s, SSA-1099, K-1, or 1098 — together.</p>
+          <h2>Start a Filing & Advisory Run</h2>
+          <p>Upload Form 16 (Part A & B), Form 26AS, AIS, Broker P&L CSV, or Rent Receipts.</p>
           <label
             className={`file-field${dragging ? " dragging" : ""}`}
             onDragOver={(event) => {
@@ -124,14 +124,14 @@ export default function App() {
             <input
               type="file"
               multiple
-              accept=".pdf,.png,.jpg,.jpeg"
+              accept=".pdf,.png,.jpg,.jpeg,.csv"
               onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
             />
             <span>
               {dragging
                 ? "Drop to upload"
                 : files.length === 0
-                  ? "Drop files here, or choose PDF / images"
+                  ? "Drop files here, or choose Form 16 / 26AS / AIS / CSV"
                   : files.length === 1
                     ? files[0].name
                     : `${files.length} files selected`}

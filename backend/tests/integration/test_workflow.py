@@ -1,21 +1,42 @@
-"""Exercises the LangGraph self-healing loop with lightweight stub agents.
+"""Exercises the LangGraph Indian Tax self-healing loop with lightweight stub agents.
 
-No OCR / Ollama / ReportLab needed -- this validates routing: the
-verify -> remediate -> (re-extract | recalc) -> verify cycle and its bounded
-escape to manual review.
+Validates routing: the verify -> remediate -> (re-extract | recalc) -> verify cycle
+and its bounded escape to manual review across the 8-node Indian pipeline.
 """
 
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
-from app.agents.tax_processing.tax_calculator import TaxCalculator
-from app.schemas import (
+from app.schemas.tax import (
     AuditEntry,
     FilingReceipt,
+    Form16,
+    IndianTaxpayerData,
+    TaxesPaid,
     VerificationCheck,
     VerificationResult,
+    WorkflowStatus,
 )
-from app.synthetic import synthetic_return
 from app.workflow.graph import TaxWorkflow
+
+
+def _stub_taxpayer():
+    return IndianTaxpayerData(
+        name="Workflow Test User",
+        pan="ABCPA1234E",
+        bank_ifsc="HDFC0001234",
+        bank_account_last4="5678",
+        financial_year="2025-26",
+        form16s=[
+            Form16(
+                employer_name="Test Employer",
+                gross_salary_17_1=Decimal("1500000"),
+                tds_deducted=Decimal("145000"),
+            )
+        ],
+        taxes_paid=TaxesPaid(tds_salary=Decimal("145000")),
+    )
 
 
 class StubReading:
@@ -24,16 +45,15 @@ class StubReading:
 
     def run_many(self, paths, scale=2):
         self.calls += 1
-        return synthetic_return(), "raw text", [
+        return _stub_taxpayer(), "raw text", [
             AuditEntry(agent="reading", action="extract", reason="stub")
         ]
 
-
-class StubProcessing:
-    def run(self, data):
-        return TaxCalculator().calculate(data), AuditEntry(
-            agent="processing", action="calc", reason="stub"
-        )
+    def run(self, paths):
+        self.calls += 1
+        return _stub_taxpayer(), "raw text", [
+            AuditEntry(agent="reading", action="extract", reason="stub")
+        ]
 
 
 class StubVerifier:
@@ -44,15 +64,16 @@ class StubVerifier:
         self.fail_times = fail_times
         self.requires_reextraction = requires_reextraction
 
-    def run(self, data, calculation, transcript=None):
+    def run(self, data, comparison, transcript=None, **kwargs):
         self.calls += 1
         valid = self.calls > self.fail_times
         result = VerificationResult(
             valid=valid,
             confidence_score=0.99 if valid else 0.5,
-            checks=[VerificationCheck(name="x", passed=valid, message="m")],
+            checks=[VerificationCheck(name="TDS Check", passed=valid, message="Reconciled" if valid else "Mismatch")],
             requires_reextraction=not valid and self.requires_reextraction,
             correctness_ok=valid,
+            completeness_ok=valid,
         )
         return result, AuditEntry(agent="verify", action="verify", reason="stub")
 
@@ -70,8 +91,8 @@ class StubDocumentation:
     def run(self, result, output: Path, preview=None):
         receipt = FilingReceipt(
             submission_id=result.submission_id,
-            reference_number="ACK123",
-            timestamp=__import__("datetime").datetime.now(),
+            reference_number="ACK123456789012",
+            timestamp=datetime.now(timezone.utc),
             filing_status="accepted",
         )
         return receipt, output, AuditEntry(
@@ -82,7 +103,6 @@ class StubDocumentation:
 def _workflow(verifier, reading=None, max_attempts=2):
     return TaxWorkflow(
         reading=reading or StubReading(),
-        processing=StubProcessing(),
         verification=verifier,
         remediation=StubRemediation(),
         documentation=StubDocumentation(),
@@ -93,10 +113,10 @@ def _workflow(verifier, reading=None, max_attempts=2):
 def _state(sub_id="sub-1"):
     return {
         "submission_id": sub_id,
-        "original_filename": "w2.pdf",
-        "upload_path": "/tmp/w2.pdf",
-        "report_path": "/tmp/out.pdf",
-        "status": "parsing",
+        "original_filename": "form16.pdf",
+        "upload_path": Path("form16.pdf"),
+        "report_path": Path("report.pdf"),
+        "status": WorkflowStatus.PARSING,
         "audit_trail": [],
         "remediation_attempts": 0,
     }
@@ -105,8 +125,10 @@ def _state(sub_id="sub-1"):
 def test_valid_return_completes_immediately():
     wf = _workflow(StubVerifier(fail_times=0, requires_reextraction=False))
     out = wf.run(_state())
-    assert out["status"] == "completed"
-    assert out["receipt"]["reference_number"] == "ACK123"
+    assert out["status"] == WorkflowStatus.COMPLETED or out["status"] == "completed"
+    assert out["receipt"] is not None
+    ref = out["receipt"].get("reference_number") if isinstance(out["receipt"], dict) else out["receipt"].reference_number
+    assert ref == "ACK123456789012"
 
 
 def test_remediation_then_success_recalculates_without_reextraction():
@@ -115,7 +137,7 @@ def test_remediation_then_success_recalculates_without_reextraction():
         StubVerifier(fail_times=1, requires_reextraction=False), reading=reading
     )
     out = wf.run(_state("sub-2"))
-    assert out["status"] == "completed"
+    assert out["status"] == WorkflowStatus.COMPLETED or out["status"] == "completed"
     assert reading.calls == 1  # recalc path, no re-extraction
     assert out["remediation_attempts"] == 1
 
@@ -128,6 +150,5 @@ def test_reextraction_loop_is_bounded_and_escapes_to_manual_review():
         max_attempts=2,
     )
     out = wf.run(_state("sub-3"))
-    assert out["status"] == "manual_review"
-    # initial parse + one re-extraction per remediation attempt (2) = 3.
+    assert out["status"] == WorkflowStatus.MANUAL_REVIEW or out["status"] == "manual_review"
     assert reading.calls == 3

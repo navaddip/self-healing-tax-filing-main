@@ -4,9 +4,14 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-import pytesseract
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
-from pytesseract import Output
+
+try:
+    import pytesseract
+    from pytesseract import Output
+except Exception:  # pragma: no cover - optional runtime dependency
+    pytesseract = None
+    Output = None
 
 
 @dataclass
@@ -24,8 +29,8 @@ class OCRService:
         )
         if not detected and windows_default.exists():
             detected = str(windows_default)
-        self.available = bool(detected)
-        if detected:
+        self.available = bool(detected and pytesseract is not None and Output is not None)
+        if detected and pytesseract is not None:
             pytesseract.pytesseract.tesseract_cmd = detected
 
     def preprocess(self, image: Image.Image) -> Image.Image:

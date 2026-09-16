@@ -11,17 +11,51 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.platypus import (
-    Paragraph,
-    SimpleDocTemplate,
-    Spacer,
-    Table,
-    TableStyle,
-)
+import fitz
+
+try:  # pragma: no cover - optional runtime dependency
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+    REPORTLAB_AVAILABLE = True
+except Exception:  # pragma: no cover - optional runtime dependency
+    REPORTLAB_AVAILABLE = False
+
+    class _DummyColors:
+        white = "#FFFFFF"
+
+        def HexColor(self, value: str) -> str:
+            return value
+
+    class _DummyParagraphStyle:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    class _DummyFlowable:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    class _DummySimpleDocTemplate:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def build(self, *_args, **_kwargs):
+            return None
+
+    colors = _DummyColors()
+    ParagraphStyle = _DummyParagraphStyle
+    inch = 72
+    Paragraph = Spacer = Table = TableStyle = _DummyFlowable
+    SimpleDocTemplate = _DummySimpleDocTemplate
+    letter = (612, 792)
 
 from app.schemas import FilingReceipt, SubmissionResult, TaxpayerData
 from app.schemas.tax import TaxCalculation, VerificationResult
@@ -54,6 +88,8 @@ class ProfessionalReportService:
     def generate(
         self, result: SubmissionResult, receipt: FilingReceipt, output: Path
     ) -> Path:
+        if not REPORTLAB_AVAILABLE:
+            return self._generate_fallback(result, receipt, output)
         data = result.extracted_data or TaxpayerData()
         calc = result.calculation
         ver = result.verification
@@ -86,6 +122,62 @@ class ProfessionalReportService:
         story.append(Spacer(1, 9))
         story.append(self._agent_pipeline(data, ver))
         doc.build(story, onFirstPage=self._frame, onLaterPages=self._frame)
+        return output
+
+    def _generate_fallback(
+        self, result: SubmissionResult, receipt: FilingReceipt, output: Path
+    ) -> Path:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        data = result.extracted_data or TaxpayerData()
+        calc = result.calculation
+        ver = result.verification
+
+        lines = [
+            "PROFESSIONAL TAX FILING REPORT",
+            f"Reference: {receipt.reference_number}",
+            f"Status: {receipt.filing_status}",
+            f"Submission: {result.submission_id}",
+            f"Taxpayer: {data.employee_name or 'Not provided'}",
+            f"Employer: {data.employer_name or 'Not provided'}",
+            f"Tax year: {data.tax_year}",
+        ]
+        if calc is not None:
+            lines.extend(
+                [
+                    f"Total income: {_money(calc.total_income)}",
+                    f"Taxable income: {_money(calc.taxable_income)}",
+                    f"Federal tax: {_money(calc.federal_tax)}",
+                    f"State tax: {_money(calc.state_tax)}",
+                    f"Refund: {_money(calc.refund)}",
+                    f"Tax due: {_money(calc.tax_due)}",
+                ]
+            )
+        if ver is not None:
+            lines.extend(
+                [
+                    f"Verification valid: {ver.valid}",
+                    f"Confidence: {round(ver.confidence_score * 100)}%",
+                    f"Correctness: {ver.correctness_ok}",
+                    f"Completeness: {ver.completeness_ok}",
+                ]
+            )
+        if result.audit_trail:
+            lines.append("Audit trail:")
+            for entry in result.audit_trail[:12]:
+                lines.append(f"- {entry.agent}: {entry.action} ({entry.reason})")
+
+        document = fitz.open()
+        page = document.new_page(width=612, height=792)
+        page.insert_textbox(
+            fitz.Rect(40, 40, 572, 752),
+            "\n".join(lines),
+            fontsize=12,
+            fontname="helv",
+            color=(0, 0, 0),
+            align=0,
+        )
+        document.save(str(output))
+        document.close()
         return output
 
     # ---------- masthead ----------
