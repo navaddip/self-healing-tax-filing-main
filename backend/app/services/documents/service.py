@@ -7,7 +7,7 @@ import fitz
 from PIL import Image
 
 
-SUPPORTED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
+SUPPORTED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".csv"}
 
 
 @dataclass
@@ -15,6 +15,7 @@ class DocumentPage:
     number: int
     image: Image.Image
     embedded_text: str = ""
+    embedded_words: list[tuple[float, float, float, float, str]] | None = None
 
 
 class DocumentService:
@@ -40,6 +41,10 @@ class DocumentService:
                         number=index + 1,
                         image=image,
                         embedded_text=page.get_text("text"),
+                        embedded_words=[
+                            (word[0], word[1], word[2], word[3], word[4])
+                            for word in page.get_text("words")
+                        ],
                     )
                 )
         return pages

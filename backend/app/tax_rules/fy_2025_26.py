@@ -85,7 +85,11 @@ PARAMS_2025_26 = TaxYearParams(
     year=2025,
     financial_year="2025-26",
     assessment_year="2026-27",
-    source="Finance Act 2025; Income-tax Act 1961",
+    source=(
+        "Income Tax Department, Salaried Individuals for AY 2026-27: "
+        "https://www.incometax.gov.in/iec/foportal/help/individual/return-applicable-1; "
+        "Income-tax Act, 1961, sections 288A and 288B"
+    ),
     verified=True,
     cess_rate=Decimal("0.04"),
     regimes={

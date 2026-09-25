@@ -6,10 +6,13 @@ tax/
 |   |-- app/
 |   |   |-- agents/
 |   |   |   |-- reading/
-|   |   |   |-- tax_processing/
+|   |   |   |-- income/
+|   |   |   |-- regimes/
+|   |   |   |-- comparison/
 |   |   |   |-- verification/
 |   |   |   |-- remediation/
 |   |   |   `-- documentation/
+|   |   |-- itr/
 |   |   |-- api/
 |   |   |   |-- routes/
 |   |   |   `-- dependencies/

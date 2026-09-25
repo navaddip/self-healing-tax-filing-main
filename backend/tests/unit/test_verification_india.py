@@ -218,6 +218,49 @@ def test_itr_form_selector_rejects_stcg_for_itr1(golden_data):
     assert any("STCG" in r for r in reasons)
 
 
+def test_capital_loss_alone_does_not_need_special_income_interest_review(golden_data, verification_agent, params):
+    def interest_check(data):
+        res_old = OldRegimeCalculator().calculate(data, IncomeComputationService().compute(data, Regime.OLD, params), params, date(2026, 7, 31))
+        res_new = NewRegimeCalculator().calculate(data, IncomeComputationService().compute(data, Regime.NEW, params), params, date(2026, 7, 31))
+        comparison, _ = RegimeComparisonAgent(params).run(data, res_old, res_new)
+        result, _ = verification_agent.run(data, comparison)
+        return next(c.passed for c in result.checks if c.name == "interest_timing_supported"), comparison
+
+    def trade(sale):
+        return CapitalGainItem(asset_type="listed_equity", acquisition_date=date(2025, 5, 1), transfer_date=date(2025, 9, 1),
+                               cost_of_acquisition=Decimal("300000"), sale_consideration=Decimal(sale), stt_paid=True)
+
+    data = golden_data.model_copy(deep=True)
+    data.taxes_paid.tds_salary = Decimal("0")  # 234C applies
+    data.capital_gains = [trade("200000")]    # 1L short-term loss
+    passed, comparison = interest_check(data)
+    assert comparison.new.interest_234c > 0
+    assert passed is True
+
+    data.capital_gains = [trade("500000")]    # 2L short-term gain still needs review
+    assert interest_check(data)[0] is False
+
+
+def test_itr_form_selector_measures_ltcg_from_sale_and_cost(golden_data):
+    data = golden_data.model_copy(deep=True)
+    data.capital_gains.append(
+        CapitalGainItem(
+            asset_type="listed_equity",
+            acquisition_date=date(2023, 1, 10),
+            transfer_date=date(2025, 6, 10),
+            cost_of_acquisition=Decimal("100000"),
+            sale_consideration=Decimal("250000"),
+            stt_paid=True,
+            is_long_term=True,
+        )
+    )
+
+    form, reasons = select_itr_form(data, Decimal("1000000"))
+
+    assert form == ITRForm.ITR2
+    assert any("1,50,000" in r or "150,000" in r for r in reasons)
+
+
 def test_remediation_heals_tds_mismatch(golden_data, remediation_agent, verification_agent, params):
     """Remediation heals a TDS mismatch in 1 pass by adopting 26AS."""
     # Data with mismatch: Form 16 claims 150,000, 26AS shows 145,000
@@ -267,3 +310,35 @@ def test_remediation_caps_80c_excess(golden_data, remediation_agent, verificatio
     # Remediation enforces ₹1,50,000 cap
     healed_data, _, audit = remediation_agent.run(excess_data, ver_res)
     assert healed_data.deduction_claims["80C"] == Decimal("150000")
+
+
+def test_remediation_heals_capital_gain_holding_classification(golden_data, remediation_agent, verification_agent, params):
+    data = golden_data.model_copy(deep=True)
+    data.capital_gains = [
+        CapitalGainItem(
+            asset_type="listed_equity",
+            acquisition_date=date(2023, 1, 10),
+            transfer_date=date(2025, 6, 10),
+            cost_of_acquisition=Decimal("100000"),
+            sale_consideration=Decimal("250000"),
+            stt_paid=True,
+            is_long_term=False,
+        )
+    ]
+
+    def verify(d):
+        inc_old = IncomeComputationService().compute(d, Regime.OLD, params)
+        inc_new = IncomeComputationService().compute(d, Regime.NEW, params)
+        res_old = OldRegimeCalculator().calculate(d, inc_old, params, date(2026, 7, 31))
+        res_new = NewRegimeCalculator().calculate(d, inc_new, params, date(2026, 7, 31))
+        comparison, _ = RegimeComparisonAgent(params).run(d, res_old, res_new)
+        result, _ = verification_agent.run(d, comparison)
+        return {c.name: c.passed for c in result.checks}, result
+
+    checks, ver_res = verify(data)
+    assert checks["capital_gains_classification"] is False
+
+    healed_data, _, _ = remediation_agent.run(data, ver_res)
+
+    assert healed_data.capital_gains[0].is_long_term is True
+    assert verify(healed_data)[0]["capital_gains_classification"] is True

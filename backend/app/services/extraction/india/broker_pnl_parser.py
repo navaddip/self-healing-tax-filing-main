@@ -74,6 +74,7 @@ class BrokerPnLParser:
             expenses = _clean_amount(row.get("transfer_expenses") or row.get("charges") or "0")
 
             # Holding period determination
+            days = 0
             if buy_date and sell_date:
                 days = (sell_date - buy_date).days
                 is_long = days > 365
@@ -101,6 +102,8 @@ class BrokerPnLParser:
                 transfer_expenses=expenses,
                 stt_paid=True,
                 is_pre_23jul2024=is_pre_cutoff,
+                holding_days=days,
+                is_long_term=is_long,
             )
             items.append(item)
 

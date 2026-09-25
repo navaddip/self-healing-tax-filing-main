@@ -30,8 +30,165 @@ def _clean_amount(text: str) -> Decimal:
 class Form16Parser:
     """Deterministic, label-anchored parser for Indian Form 16 Part A and Part B."""
 
+    @staticmethod
+    def _cell_lines(
+        page_words: list[list[tuple[float, float, float, float, str]]],
+        page_index: int,
+        rect: tuple[float, float, float, float],
+    ) -> list[str]:
+        if page_index >= len(page_words):
+            return []
+        x0, y0, x1, y1 = rect
+        selected = []
+        for wx0, wy0, wx1, wy1, word in page_words[page_index]:
+            cx = (wx0 + wx1) / 2
+            cy = (wy0 + wy1) / 2
+            if x0 <= cx <= x1 and y0 <= cy <= y1:
+                selected.append((wy0, wx0, word))
+        selected.sort()
+        lines: list[list[tuple[float, str]]] = []
+        line_y: list[float] = []
+        for wy0, wx0, word in selected:
+            if not line_y or abs(wy0 - line_y[-1]) > 2.5:
+                line_y.append(wy0)
+                lines.append([])
+            lines[-1].append((wx0, word))
+        return [
+            " ".join(word for _, word in sorted(line)).strip()
+            for line in lines
+            if line
+        ]
+
+    @classmethod
+    def extract_employee_name(
+        cls,
+        page_words: list[list[tuple[float, float, float, float, str]]],
+    ) -> str:
+        lines = cls._cell_lines(page_words, 0, (276, 251, 540, 274))
+        return lines[0] if lines else ""
+
+    @classmethod
+    def _extract_official_table_fields(
+        cls,
+        page_words: list[list[tuple[float, float, float, float, str]]],
+    ) -> dict[str, Any]:
+        """Read the fixed cells of the current CBDT Form 16 table layout."""
+        if len(page_words) < 4:
+            return {}
+
+        def first_line(page: int, rect: tuple[float, float, float, float]) -> str:
+            lines = cls._cell_lines(page_words, page, rect)
+            return lines[0] if lines else ""
+
+        def amount(
+            page: int, rect: tuple[float, float, float, float]
+        ) -> Decimal:
+            for line in cls._cell_lines(page_words, page, rect):
+                for token in line.split():
+                    if re.fullmatch(r"\(?[0-9][0-9,]*(?:\.[0-9]+)?\)?", token):
+                        negative = token.startswith("(") and token.endswith(")")
+                        value = _clean_amount(token)
+                        return -value if negative else value
+            return Decimal("0")
+
+        fields: dict[str, Any] = {
+            "certificate_number": first_line(0, (60, 211, 276, 229)),
+            "employer_name": first_line(0, (60, 251, 276, 274)),
+            "employee_name": first_line(0, (276, 251, 540, 274)),
+            "tds_deducted": amount(0, (350, 566, 426, 585)),
+            "gross_salary_17_1": amount(1, (430, 507, 547, 530)),
+            "perquisites_17_2": amount(1, (430, 529, 547, 565)),
+            "profits_in_lieu_17_3": amount(1, (430, 564, 547, 597)),
+            "standard_deduction": amount(2, (378, 211, 431, 231)),
+            "professional_tax": amount(2, (378, 241, 431, 256)),
+            "entertainment_allowance": amount(2, (378, 228, 431, 244)),
+            "taxable_salary_per_employer": amount(2, (431, 274, 547, 294)),
+        }
+
+        # Fallback to Part B Row 19 (Net TDS deducted) or first summary row
+        if fields["tds_deducted"] == Decimal("0") and len(page_words) >= 4:
+            fields["tds_deducted"] = amount(3, (430, 483, 547, 510))
+        if fields["tds_deducted"] == Decimal("0"):
+            fields["tds_deducted"] = amount(0, (350, 526, 426, 548))
+
+        # Row 7(a) & 7(b): Other income / House property loss reported by employee
+        hp_loss = amount(2, (430, 303, 547, 328))
+        if hp_loss == Decimal("0"):
+            hp_loss = amount(2, (378, 303, 431, 328))
+        fields["reported_house_property_loss"] = abs(hp_loss)
+
+        other_inc = amount(2, (430, 327, 547, 341))
+        if other_inc == Decimal("0"):
+            other_inc = amount(2, (378, 327, 431, 341))
+        fields["reported_other_income"] = other_inc
+        fields["reported_savings_interest"] = amount(3, (333, 110, 378, 151))
+        fields["relief_89"] = amount(3, (430, 460, 547, 483))
+
+        hra = amount(1, (430, 711, 547, 744))
+        lta = amount(1, (430, 647, 547, 671))
+        fields["exempt_allowances_10"] = {
+            key: value
+            for key, value in (("hra", hra), ("lta", lta))
+            if value > Decimal("0")
+        }
+
+        deduction_cells = {
+            "80C": (2, (431, 414, 547, 459)),
+            "80CCC": (2, (431, 457, 547, 498)),
+            "80CCD1": (2, (431, 496, 547, 538)),
+            "80CCD1B": (2, (431, 561, 547, 603)),
+            "80CCD2": (2, (431, 600, 547, 642)),
+            "80D": (2, (431, 639, 547, 681)),
+            "80E": (2, (431, 678, 547, 721)),
+            "80G": (3, (431, 69, 547, 113)),
+            "80TTA": (3, (431, 110, 547, 151)),
+        }
+        fields["chapter_via_claimed"] = {
+            section: value
+            for section, (page, rect) in deduction_cells.items()
+            if (value := amount(page, rect)) > Decimal("0")
+        }
+
+        period_lines = cls._cell_lines(page_words, 0, (385, 373, 541, 397))
+        dates = re.findall(
+            r"\b[0-9]{2}/[0-9]{2}/[0-9]{4}\b", " ".join(period_lines)
+        )
+        if len(dates) >= 2:
+            fields["period_from"] = datetime.strptime(dates[0], "%d/%m/%Y").date()
+            fields["period_to"] = datetime.strptime(dates[1], "%d/%m/%Y").date()
+        return fields
+
+    @staticmethod
+    def extract_employee_pan(text: str) -> str:
+        """Return the employee's PAN from regular or table-layout Form 16 text.
+
+        In the official table layout, PDF extraction commonly puts the PAN labels
+        before every entered value.  The fallback therefore selects a valid
+        individual PAN token (fourth character ``P``), excluding employer PANs.
+        """
+        labelled_patterns = (
+            r"PAN\s*(?:of\s*(?:the\s*)?Employee|of\s*Employee)\s*[:\-]?\s*([A-Z]{5}\s*[0-9]{4}\s*[A-Z])",
+            r"Employee\s*PAN\s*[:\-]?\s*([A-Z]{5}\s*[0-9]{4}\s*[A-Z])",
+        )
+        for pattern in labelled_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                candidate = re.sub(r"\s+", "", match.group(1)).upper()
+                if validate_pan(candidate, individual_only=True):
+                    return candidate
+
+        candidates: list[str] = []
+        for match in re.finditer(r"\b([A-Z]{5}\s*[0-9]{4}\s*[A-Z])\b", text, re.IGNORECASE):
+            candidate = re.sub(r"\s+", "", match.group(1)).upper()
+            if validate_pan(candidate, individual_only=True) and candidate not in candidates:
+                candidates.append(candidate)
+        return candidates[0] if candidates else ""
+
     def parse(
-        self, text: str, page_images: list[Any] | None = None
+        self,
+        text: str,
+        page_images: list[Any] | None = None,
+        page_words: list[list[tuple[float, float, float, float, str]]] | None = None,
     ) -> tuple[Form16, list[SourceEvidence]]:
         evidence: list[SourceEvidence] = []
 
@@ -96,6 +253,26 @@ class Form16Parser:
             "employer_pan",
             [
                 r"PAN\s*(?:of\s*the\s*Deductor)?[:\s]*([A-Z]{5}[0-9]{4}[A-Z])",
+            ],
+        )
+
+        employee_pan = self.extract_employee_pan(text)
+        if employee_pan:
+            evidence.append(
+                SourceEvidence(
+                    field_name="employee_pan",
+                    source_document="Form16",
+                    page_number=1,
+                    confidence=0.95,
+                    raw_text=employee_pan,
+                )
+            )
+
+        employee_name = match_str_and_record(
+            "employee_name",
+            [
+                r"Name\s*(?:and\s*Designation)?\s*of\s*the\s*Employee\s*[:\s]*([^\n\r]+)",
+                r"Employee\s*Name\s*[:\s]*([^\n\r]+)",
             ],
         )
 
@@ -230,6 +407,52 @@ class Form16Parser:
             if val > Decimal("0"):
                 chapter_via[sec] = val
 
+        table_fields = self._extract_official_table_fields(page_words or [])
+        if table_fields:
+            employer_name = table_fields.get("employer_name") or employer_name
+            certificate_number = (
+                table_fields.get("certificate_number") or certificate_number
+            )
+            period_from = table_fields.get("period_from") or period_from
+            period_to = table_fields.get("period_to") or period_to
+            salary_17_1 = table_fields.get("gross_salary_17_1", salary_17_1)
+            perquisites_17_2 = table_fields.get(
+                "perquisites_17_2", perquisites_17_2
+            )
+            profits_in_lieu_17_3 = table_fields.get(
+                "profits_in_lieu_17_3", profits_in_lieu_17_3
+            )
+            std_deduction = table_fields.get(
+                "standard_deduction", std_deduction
+            )
+            prof_tax = table_fields.get("professional_tax", prof_tax)
+            entertainment = table_fields.get(
+                "entertainment_allowance", entertainment
+            )
+            taxable_salary = table_fields.get(
+                "taxable_salary_per_employer", taxable_salary
+            )
+            tds_deducted = table_fields.get("tds_deducted", tds_deducted)
+            exempt_allowances = table_fields.get(
+                "exempt_allowances_10", exempt_allowances
+            )
+            chapter_via = table_fields.get(
+                "chapter_via_claimed", chapter_via
+            )
+
+            for field_name, value in table_fields.items():
+                if field_name == "employee_name" or value in (None, "", {}, Decimal("0")):
+                    continue
+                evidence.append(
+                    SourceEvidence(
+                        field_name=field_name,
+                        source_document="Form16",
+                        page_number=1,
+                        confidence=0.99,
+                        raw_text=str(value),
+                    )
+                )
+
         # Detect regime used by employer
         # New regime Form 16 typically shows ₹75,000 standard deduction and minimal/no Chapter VI-A (except 80CCD2)
         if std_deduction >= Decimal("75000") and (
@@ -238,6 +461,22 @@ class Form16Parser:
             regime_used = Regime.NEW
         else:
             regime_used = Regime.OLD
+
+        reported_hp_loss = (
+            table_fields.get("reported_house_property_loss", Decimal("0"))
+            if table_fields
+            else Decimal("0")
+        )
+        reported_other_inc = (
+            table_fields.get("reported_other_income", Decimal("0"))
+            if table_fields
+            else Decimal("0")
+        )
+        reported_savings_interest = (
+            table_fields.get("reported_savings_interest", Decimal("0"))
+            if table_fields
+            else Decimal("0")
+        )
 
         form16 = Form16(
             employer_name=employer_name,
@@ -257,6 +496,10 @@ class Form16Parser:
             regime_used=regime_used,
             tds_deducted=tds_deducted,
             taxable_salary_per_employer=taxable_salary,
+            reported_house_property_loss=reported_hp_loss,
+            reported_other_income=reported_other_inc,
+            reported_savings_interest=reported_savings_interest,
+            relief_89=table_fields.get("relief_89", Decimal("0")) if table_fields else Decimal("0"),
         )
 
         return form16, evidence

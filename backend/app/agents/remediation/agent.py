@@ -94,6 +94,7 @@ class RemediationAgent:
                     should_be_long = days > 365
                     if item.is_long_term != should_be_long:
                         item.holding_days = days
+                        item.is_long_term = should_be_long
                         changes[f"holding_period_{item.asset_type}"] = {
                             "days": days,
                             "classified_as": "Long-term" if should_be_long else "Short-term",

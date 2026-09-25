@@ -25,6 +25,7 @@ from app.schemas.tax import (
     SubmissionResult,
     VerificationResult,
     WorkflowStatus,
+    age_band_on,
 )
 from app.tax_rules.params import get_params
 from app.workflow.state import TaxWorkflowState
@@ -42,8 +43,14 @@ class TaxWorkflow:
         remediation: RemediationAgent | None = None,
         documentation: DocumentationAgent | None = None,
         max_attempts: int = 2,
+        checkpointer: Any | None = None,
+        cancellation_check: Any | None = None,
+        filing_details_loader: Any | None = None,
         processing: Any | None = None,  # backwards compatibility
     ):
+        self.cancellation_check = cancellation_check
+        self.filing_details_loader = filing_details_loader
+        self.checkpointer = checkpointer
         self.reading = reading
         self.income_service = income_service or IncomeComputationService()
         self.old_calculator = old_calculator or OldRegimeCalculator()
@@ -57,15 +64,18 @@ class TaxWorkflow:
 
     def _build(self):
         graph = StateGraph(TaxWorkflowState)
-        graph.add_node("parse", self._parse)
-        graph.add_node("compute_income", self._compute_income)
-        graph.add_node("tax_old", self._tax_old)
-        graph.add_node("tax_new", self._tax_new)
-        graph.add_node("compare", self._compare)
-        graph.add_node("verify", self._verify)
-        graph.add_node("remediate", self._remediate)
-        graph.add_node("document", self._document)
-        graph.add_node("manual_review", self._manual_review)
+        def guarded(node):
+            def run_node(state):
+                if self.cancellation_check and self.cancellation_check(state["submission_id"]):
+                    raise RuntimeError("Processing cancelled")
+                return node(state)
+            return run_node
+        for name, node in (("parse", self._parse), ("compute_income", self._compute_income),
+                           ("tax_old", self._tax_old), ("tax_new", self._tax_new),
+                           ("compare", self._compare), ("verify", self._verify),
+                           ("remediate", self._remediate), ("document", self._document),
+                           ("manual_review", self._manual_review)):
+            graph.add_node(name, guarded(node))
 
         graph.add_edge(START, "parse")
         graph.add_edge("parse", "compute_income")
@@ -90,12 +100,13 @@ class TaxWorkflow:
         )
         graph.add_edge("document", END)
         graph.add_edge("manual_review", END)
-        return graph.compile(checkpointer=MemorySaver())
+        return graph.compile(checkpointer=self.checkpointer or MemorySaver())
 
     def run(self, state: TaxWorkflowState) -> TaxWorkflowState:
         config = {"configurable": {"thread_id": state.get("submission_id", "default")}}
         try:
-            return self.graph.invoke(state, config=config)
+            snapshot = self.graph.get_state(config)
+            return self.graph.invoke(None if snapshot.next else state, config=config)
         except Exception as exc:
             return {**state, "status": "failed", "error": str(exc)}
 
@@ -112,6 +123,16 @@ class TaxWorkflow:
             for p in state.get("upload_paths") or [state["upload_path"]]
         ]
         data, raw_text, logs = self.reading.run_many(paths, scale=scale)
+        params = get_params(state.get("financial_year", data.financial_year))
+        data.financial_year = params.financial_year
+        data.assessment_year = params.assessment_year
+        details = self.filing_details_loader(state["submission_id"]) if self.filing_details_loader else None
+        if details:
+            data = data.model_copy(update=details.provided())
+            if data.bank_account_number:
+                data.bank_account_last4 = data.bank_account_number[-4:]
+            if data.date_of_birth:
+                data.age_band = age_band_on(data.date_of_birth, params.year)
         return {
             "status": WorkflowStatus.PARSING.value,
             "extracted_data": data.model_dump(mode="json"),
@@ -148,7 +169,7 @@ class TaxWorkflow:
         inc_old = HeadwiseIncome.model_validate(state["computed_income_old"])
         params = get_params(data.financial_year)
         result_old = self.old_calculator.calculate(
-            data, inc_old, params, filing_date=date(2026, 7, 31)
+            data, inc_old, params, filing_date=data.filing_date or params.filing_due_date
         )
         return {
             "result_old": result_old.model_dump(mode="json"),
@@ -159,7 +180,7 @@ class TaxWorkflow:
         inc_new = HeadwiseIncome.model_validate(state["computed_income_new"])
         params = get_params(data.financial_year)
         result_new = self.new_calculator.calculate(
-            data, inc_new, params, filing_date=date(2026, 7, 31)
+            data, inc_new, params, filing_date=data.filing_date or params.filing_due_date
         )
         return {
             "result_new": result_new.model_dump(mode="json"),
@@ -270,7 +291,7 @@ class TaxWorkflow:
         receipt, path, log = self.documentation.run(
             result,
             Path(state["report_path"]),
-            Path(state["upload_path"]),
+            [Path(p) for p in state.get("upload_paths") or [state["upload_path"]]],
         )
         return {
             "status": WorkflowStatus.COMPLETED.value,

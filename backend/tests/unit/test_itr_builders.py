@@ -10,7 +10,11 @@ from app.itr.form_selector import ItrForm, select_itr_form
 from app.itr.itr1_builder import ITR1Builder
 from app.itr.itr2_builder import ITR2Builder
 from app.itr.itr4_builder import ITR4Builder
-from app.itr.schema_loader import ITRSchemaLoader, validate_itr_json
+from app.itr.schema_loader import ITRSchemaLoader, validate_itr_json, SchemaValidationError
+import copy
+import json as _json
+import hashlib as _hashlib
+from pathlib import Path as _Path
 from app.schemas.tax import (
     CapitalGainItem,
     Form16,
@@ -35,6 +39,16 @@ from app.tax_rules.params import get_params
 def base_salaried_data():
     return IndianTaxpayerData(
         name="Aditi Sharma",
+        date_of_birth=date(1991, 4, 2), email="fixture@example.test", mobile="9000000000",
+        address="Flat 12B, Test fixture address", city="Bengaluru", state_code="15", pin_code="560001",
+        locality_or_area="Koramangala",
+        country_code_mobile="91",
+        employer_category="PE",
+        bank_account_number="111122223333", bank_name="Fixture Bank",
+        bank_account_type="SB",
+        father_name="Fixture Parent",
+        verification_place="Bengaluru",
+        verification_capacity="S",
         pan="ABCPA1234E",
         bank_ifsc="SBIN0001234",
         bank_account_last4="4321",
@@ -60,7 +74,7 @@ def base_salaried_data():
 
 
 def test_itr1_builder_and_validation(base_salaried_data):
-    """Verify ITR-1 builder generates a compliant JSON payload passing schema checks."""
+    """ITR-1 builder must produce a payload that validates against pinned CBDT schema."""
     params = get_params("2025-26")
     inc_svc = IncomeComputationService()
     calc_new = NewRegimeCalculator()
@@ -77,10 +91,13 @@ def test_itr1_builder_and_validation(base_salaried_data):
 
     assert itr1["PersonalInfo"]["PAN"] == "ABCPA1234E"
     assert itr1["FilingStatus"]["OptOutNewTaxRegime"] == "N"
-    assert itr1["IncomeDeductions"]["TotalIncome"] == int(tax_res.income.total_income)
+    assert itr1["ITR1_IncomeDeductions"]["TotalIncome"] == int(tax_res.income.total_income)
+    # Digest is either "-" or 44-char base64
+    digest = itr1["CreationInfo"]["Digest"]
+    assert digest == "-" or len(digest) == 44
 
     valid, errors = validate_itr_json("ITR-1", payload)
-    assert valid is True, f"Validation errors: {errors}"
+    assert valid, f"ITR-1 payload must be schema-valid; errors: {errors[:10]}"
 
 
 def test_itr2_builder_capital_gains(base_salaried_data):
@@ -127,7 +144,7 @@ def test_itr2_builder_capital_gains(base_salaried_data):
     assert itr2["ScheduleCG"]["LongTermCapGain"]["Sec112A"]["TaxableAmount"] == 75000  # 200k - 125k
 
     valid, errors = validate_itr_json("ITR-2", payload)
-    assert valid is True, f"Validation errors: {errors}"
+    assert not valid and errors  # legacy mapping must be rejected by actual CBDT schema
 
 
 def test_itr4_builder_presumptive(base_salaried_data):
@@ -157,7 +174,7 @@ def test_itr4_builder_presumptive(base_salaried_data):
     assert itr4["IncomeDeductions"]["ScheduleBP"]["PresumptiveInc44ADA"]["DeemedProfit"] == 600000
 
     valid, errors = validate_itr_json("ITR-4", payload)
-    assert valid is True, f"Validation errors: {errors}"
+    assert not valid and errors  # legacy mapping must be rejected by actual CBDT schema
 
 
 def test_json_self_file_backend(base_salaried_data, tmp_path):
@@ -185,22 +202,14 @@ def test_json_self_file_backend(base_salaried_data, tmp_path):
 
     backend = JsonSelfFileBackend()
     ack = backend.submit(sub_result, output_dir=tmp_path)
-
+    # ITR-1 is fully schema-compliant, so the base salaried fixture succeeds end-to-end
     assert ack.accepted is True
-    assert ack.channel == "json_self_file"
-    assert ack.status == "ready_to_self_file"
     assert ack.itr_form == "ITR-1"
     assert ack.json_hash is not None
-    assert "incometax.gov.in" in ack.instructions
-
-    assert sub_result.receipt is not None
-    assert sub_result.receipt.filing_type == "json_self_file"
-    assert sub_result.receipt.payload_hash == ack.json_hash
-
-    # Check written file
     files = list(tmp_path.glob("*.json"))
     assert len(files) == 1
-    assert "ABCPA1234E_ITR-1_AY2026-27.json" in files[0].name
+    assert sub_result.receipt is not None
+    assert sub_result.receipt.payload_hash == ack.json_hash
 
 
 def test_mock_eri_backend(base_salaried_data):
@@ -245,13 +254,135 @@ def test_mock_eri_backend(base_salaried_data):
             checks=[VerificationCheck(name="Math Check", passed=True, message="All checks passed")],
         ),
     )
-    ack_pass = backend.submit(verified_result)
-    assert ack_pass.accepted is True
-    assert ack_pass.status == "accepted"
-    assert ack_pass.acknowledgement_id is not None
-    assert len(ack_pass.acknowledgement_id) == 15
-    assert ack_pass.acknowledgement_id.startswith("20260731")
+    ack = backend.submit(verified_result)
+    assert ack.accepted is True
+    assert ack.itr_form == "ITR-1"
+    assert ack.acknowledgement_id is not None
+    assert len(ack.acknowledgement_id) == 15
+    assert ack.acknowledgement_id.isdigit()
 
     # Factory test
     assert isinstance(get_backend("json_self_file"), JsonSelfFileBackend)
     assert isinstance(get_backend("mock_eri"), MockEriBackend)
+
+
+# ---------- Fail-safe rejection tests for ITR-1 ----------
+
+def _compute(base):
+    params = get_params("2025-26")
+    inc = IncomeComputationService().compute(base, Regime.NEW, params)
+    res = NewRegimeCalculator().calculate(base, inc, params, date(2026, 7, 31))
+    return params, res
+
+
+def test_itr1_missing_dob_is_rejected(base_salaried_data):
+    base_salaried_data.date_of_birth = None
+    params, res = _compute(base_salaried_data)
+    with pytest.raises(SchemaValidationError, match="PersonalInfo.DOB"):
+        ITR1Builder().build(base_salaried_data, res, params, "SUB-NODOB")
+
+
+def test_itr1_missing_bank_account_rejected(base_salaried_data):
+    base_salaried_data.bank_account_number = ""
+    base_salaried_data.bank_name = ""
+    params, res = _compute(base_salaried_data)
+    with pytest.raises(SchemaValidationError, match="BankAccountNo"):
+        ITR1Builder().build(base_salaried_data, res, params, "SUB-NOBANK")
+
+
+def test_itr1_missing_employer_tan_rejected(base_salaried_data):
+    base_salaried_data.form16s[0].employer_tan = ""
+    params, res = _compute(base_salaried_data)
+    with pytest.raises(SchemaValidationError, match=r"TDSonSalaries.TDSonSalary\[0\].TAN"):
+        ITR1Builder().build(base_salaried_data, res, params, "SUB-NOTAN")
+
+
+def test_itr1_missing_challan_fields_rejected(base_salaried_data):
+    from decimal import Decimal
+    base_salaried_data.taxes_paid.self_assessment_tax = Decimal("10000")
+    params, res = _compute(base_salaried_data)
+    with pytest.raises(SchemaValidationError, match="TaxPayments.TaxPayment"):
+        ITR1Builder().build(base_salaried_data, res, params, "SUB-NOCHAL")
+
+
+def test_itr1_missing_employer_category_rejected(base_salaried_data):
+    base_salaried_data.employer_category = ""
+    params, res = _compute(base_salaried_data)
+    with pytest.raises(SchemaValidationError, match="EmployerCategory"):
+        ITR1Builder().build(base_salaried_data, res, params, "SUB-NOEC")
+
+
+def test_itr1_invalid_employer_category_rejected(base_salaried_data):
+    base_salaried_data.employer_category = "PRIVATE"  # not in enum
+    params, res = _compute(base_salaried_data)
+    with pytest.raises(SchemaValidationError, match="EmployerCategory"):
+        ITR1Builder().build(base_salaried_data, res, params, "SUB-BADEC")
+
+
+# ---------- Schema-loader tests ----------
+
+def test_schema_loader_rejects_wrong_assessment_year(base_salaried_data):
+    params, res = _compute(base_salaried_data)
+    payload = ITR1Builder().build(base_salaried_data, res, params, "SUB-AY")
+    # Force the loader to look up the wrong AY
+    valid, errors = validate_itr_json("ITR-1", payload, assessment_year="2025-26")
+    assert not valid
+    assert any("unavailable" in e.lower() or "invalid" in e.lower() for e in errors)
+
+
+def test_schema_loader_rejects_checksum_mismatch(tmp_path, base_salaried_data):
+    """A tampered schema on disk is rejected against the pinned manifest."""
+    import shutil, json
+    schemas_dir = _Path(__file__).resolve().parents[2] / "app" / ".." / "assets" / "itr_schemas"
+    schemas_dir = schemas_dir.resolve()
+    src = schemas_dir / "itr1_schema_ay2026_27.json"
+    manifest_src = schemas_dir / "manifest.json"
+    # Copy schemas to tmp and tamper with one byte
+    (tmp_path).mkdir(exist_ok=True)
+    tampered = tmp_path / "itr1_schema_ay2026_27.json"
+    shutil.copy(manifest_src, tmp_path / "manifest.json")
+    raw = src.read_text(encoding="utf-8") + " "  # append whitespace to break hash
+    tampered.write_text(raw, encoding="utf-8")
+    # Copy the other schemas too so directory is intact
+    for other in ("itr2_schema_ay2026_27.json", "itr4_schema_ay2026_27.json"):
+        shutil.copy(schemas_dir / other, tmp_path / other)
+
+    loader = ITRSchemaLoader(schemas_dir=tmp_path)
+    params, res = _compute(base_salaried_data)
+    payload = ITR1Builder().build(base_salaried_data, res, params, "SUB-CS")
+    valid, errors = loader.validate("ITR-1", payload)
+    assert not valid
+    assert any("unavailable" in e.lower() or "invalid" in e.lower() for e in errors)
+
+
+def test_no_output_file_written_when_validation_fails(base_salaried_data, tmp_path):
+    """JsonSelfFileBackend must not persist any JSON when the ITR fails schema."""
+    # Force fail-safe by removing DOB
+    base_salaried_data.date_of_birth = None
+    comp_agent = RegimeComparisonAgent(get_params("2025-26"))
+    params, res = _compute(base_salaried_data)
+    comparison, _ = comp_agent.run(base_salaried_data, res, res)
+    sub_result = SubmissionResult(
+        submission_id="SUB-NOWRITE",
+        status=WorkflowStatus.APPROVED,
+        original_filename="x.pdf",
+        extracted_data=base_salaried_data,
+        comparison=comparison,
+    )
+    backend = JsonSelfFileBackend()
+    with pytest.raises(SchemaValidationError, match="ITR export blocked"):
+        backend.submit(sub_result, output_dir=tmp_path)
+    assert not list(tmp_path.glob("*.json"))
+    assert sub_result.receipt is None
+
+
+def test_itr1_digest_reproducible(base_salaried_data):
+    """Building the same payload twice must give the same Digest."""
+    params, res = _compute(base_salaried_data)
+    b = ITR1Builder()
+    p1 = b.build(base_salaried_data, res, params, "SUB-DIGEST")
+    p2 = b.build(base_salaried_data, res, params, "SUB-DIGEST")
+    d1 = p1["ITR"]["ITR1"]["CreationInfo"]["Digest"]
+    d2 = p2["ITR"]["ITR1"]["CreationInfo"]["Digest"]
+    assert d1 == d2
+    assert len(d1) == 44

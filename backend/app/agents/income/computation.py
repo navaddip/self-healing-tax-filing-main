@@ -77,6 +77,7 @@ def apply_chapter_via(
     Returns:
         (applied_dict, total_applied, disallowed_dict, traces)
     """
+    claims = {key: max(Decimal("0"), value) for key, value in claims.items()}
     reg_params = params.regimes[regime]
     limits = params.chapter_via
     allowed_sections = reg_params.allowed_chapter_via
@@ -140,47 +141,89 @@ def apply_chapter_via(
                 disallowed["80CCD1B"] = ccd1b - allowed_ccd1b
             traces.append(f"80CCD(1B): claimed {ccd1b}, capped at {ccd1b_cap} -> allowed {allowed_ccd1b}")
 
-        # 80D Health Insurance (with senior citizen variants)
+        # Separate self/family and parents limits. Legacy aggregate claims remain
+        # conservative: only the taxpayer's own limit can be applied.
         if "80D" in claims:
-            d_claim = claims["80D"]
-            d_cap = limits.senior_variants.get("80D", Decimal("50000")) if data.age_band != AgeBand.BELOW_60 else limits.limits.get("80D", Decimal("25000"))
-            allowed_d = min(d_claim, d_cap)
-            applied["80D"] = allowed_d
-            if d_claim > allowed_d:
-                disallowed["80D"] = d_claim - allowed_d
-            traces.append(f"80D: claimed {d_claim}, capped at {d_cap} -> allowed {allowed_d}")
+            own_cap = Decimal("50000") if data.health_self_family_senior or data.age_band != AgeBand.BELOW_60 else Decimal("25000")
+            parent_cap = Decimal("50000") if data.health_parents_senior else Decimal("25000")
+            if data.health_self_family is not None or data.health_parents is not None:
+                allowed = min(data.health_self_family or Decimal("0"), own_cap) + min(data.health_parents or Decimal("0"), parent_cap)
+            else:
+                allowed = min(claims["80D"], own_cap)
+                traces.append("80D: aggregate claim; parents limit requires separate qualifying premium evidence")
+            applied["80D"] = min(claims["80D"], allowed)
+            disallowed["80D"] = claims["80D"] - applied["80D"]
 
-        # 80TTA / 80TTB Savings / Deposit interest
-        if data.age_band == AgeBand.BELOW_60:
-            if "80TTA" in claims:
-                tta = claims["80TTA"]
-                tta_cap = limits.limits.get("80TTA", Decimal("10000"))
-                allowed_tta = min(tta, tta_cap)
-                applied["80TTA"] = allowed_tta
-                traces.append(f"80TTA: claimed {tta}, capped at {tta_cap} -> allowed {allowed_tta}")
-        else:
-            if "80TTB" in claims:
-                ttb = claims["80TTB"]
-                ttb_cap = limits.senior_variants.get("80TTB", Decimal("50000"))
-                allowed_ttb = min(ttb, ttb_cap)
-                applied["80TTB"] = allowed_ttb
-                traces.append(f"80TTB: claimed {ttb}, capped at {ttb_cap} -> allowed {allowed_ttb}")
+        if "80E" in claims:
+            first = data.education_loan_first_repayment_fy
+            eligible = first is not None and 0 <= params.year - first < 8
+            applied["80E"] = claims["80E"] if eligible else Decimal("0")
+            disallowed["80E"] = claims["80E"] - applied["80E"]
+            traces.append("80E: requires first repayment FY within the eight-year eligibility window")
 
-        # Other standard sections (80E, 80G, etc.)
-        for sec in ["80E", "80G", "80GG", "80GGC", "80DD", "80DDB", "80U", "80JJAA", "80CCH"]:
+        # 80TTA (below 60, savings interest) / 80TTB (senior, all deposit interest)
+        is_senior = data.age_band != AgeBand.BELOW_60
+        interest_sections = (
+            ("80TTA", not is_senior, limits.limits.get("80TTA", Decimal("10000")), data.savings_interest),
+            ("80TTB", is_senior, limits.senior_variants.get("80TTB", Decimal("50000")), data.savings_interest + data.fd_interest),
+        )
+        for sec, eligible, cap, qualifying_interest in interest_sections:
+            if sec not in claims:
+                continue
+            claimed = claims[sec]
+            if not eligible:
+                disallowed[sec] = claimed
+                traces.append(
+                    f"{sec}: claimed {claimed} disallowed; "
+                    + ("senior citizens claim 80TTB instead" if sec == "80TTA" else "80TTB is only for senior citizens")
+                )
+                continue
+            allowed = min(claimed, cap, max(Decimal("0"), qualifying_interest))
+            applied[sec] = allowed
+            if claimed > allowed:
+                disallowed[sec] = claimed - allowed
+            traces.append(f"{sec}: claimed {claimed}, cap {cap}, qualifying interest {qualifying_interest} -> allowed {allowed}")
+
+        # Other standard sections (80E, 80G, etc.). 80DDB has a higher limit for
+        # senior citizens; 80DD/80U depend on disability severity, not age.
+        for sec in ["80GG", "80GGC", "80DD", "80DDB", "80U", "80JJAA", "80CCH"]:
             if sec in claims and sec not in applied:
                 amt = claims[sec]
                 cap = limits.limits.get(sec, Decimal("10000000"))
+                if sec == "80DDB" and is_senior:
+                    cap = limits.senior_variants.get("80DDB", cap)
                 allowed_sec = min(amt, cap)
                 applied[sec] = allowed_sec
                 if amt > allowed_sec:
                     disallowed[sec] = amt - allowed_sec
                 traces.append(f"{sec}: claimed {amt}, allowed {allowed_sec}")
 
+    if regime == Regime.OLD and "80G" in claims:
+        adjusted = max(Decimal("0"), max_deductible - sum(applied.values(), Decimal("0")))
+        budget = adjusted * Decimal("0.10")
+        donation_total = Decimal("0")
+        for donation in sorted(data.donations, key=lambda d: -d.percentage):
+            if not donation.eligible or (donation.cash and donation.amount > 2000):
+                continue
+            qualifying = donation.amount
+            if donation.qualifying_limit:
+                qualifying = min(qualifying, budget)
+                budget -= qualifying
+            donation_total += qualifying * Decimal(donation.percentage) / 100
+        applied["80G"] = min(claims["80G"], donation_total)
+        disallowed["80G"] = claims["80G"] - applied["80G"]
+        traces.append("80G: verified donation categories, percentage, cash restriction and adjusted GTI limit applied")
+
     total_applied = sum(applied.values(), Decimal("0"))
     if total_applied > max_deductible:
         traces.append(f"Chapter VI-A clamped from {total_applied} to max deductible GTI {max_deductible}")
-        total_applied = max_deductible
+        remaining = max_deductible
+        for section, amount in applied.items():
+            allowed = min(amount, remaining)
+            disallowed[section] = disallowed.get(section, Decimal("0")) + amount - allowed
+            applied[section] = allowed
+            remaining -= allowed
+        total_applied = sum(applied.values(), Decimal("0"))
 
     return applied, total_applied, disallowed, traces
 
@@ -223,10 +266,11 @@ class IncomeComputationService:
             hra_ex, hra_trace = hra_exemption(data.salary_breakup, regime)
             exempt_allowances += hra_ex
             trace.append(hra_trace)
-            # Other Section 10 exempt allowances from Form 16
+            # Use the certified Form 16 exemption when a detailed salary/rent
+            # breakup is not attached; otherwise HRA is recomputed above.
             for f16 in data.form16s:
                 for k, v in f16.exempt_allowances_10.items():
-                    if k.lower() != "hra":
+                    if k.lower() != "hra" or not data.salary_breakup:
                         exempt_allowances += v
         else:
             trace.append("New regime: Section 10 exemptions disallowed")
@@ -269,6 +313,12 @@ class IncomeComputationService:
                 statutory_deduction = nav * Decimal("0.30")  # Section 24(a)
                 net_hp = (nav - statutory_deduction - hp.interest_on_loan_24b) * hp.co_owner_share
                 let_out_net_total += net_hp
+
+        # Fallback to Form 16 reported house property loss if house_properties wasn't explicitly populated
+        if sop_interest_total == Decimal("0") and data.form16s:
+            form16_hp_loss = sum((f.reported_house_property_loss for f in data.form16s), Decimal("0"))
+            if form16_hp_loss > Decimal("0"):
+                sop_interest_total = form16_hp_loss
 
         # Self-occupied property
         if regime == Regime.OLD:
@@ -389,10 +439,12 @@ class IncomeComputationService:
                         )
                     ):
                         # Compute both 12.5% unindexed vs 20% indexed
-                        tax_unindexed = max(Decimal("0"), gain) * Decimal("0.125")
-                        acq_year = item.acquisition_date.year if item.acquisition_date else 2015
+                        tax_unindexed = max(Decimal("0"), gain) * cg_params.ltcg_112_rate
+                        # CII is keyed by financial year (April-March), not calendar year.
+                        acq = item.acquisition_date
+                        acq_year = (acq.year - 1 if acq.month < 4 else acq.year) if acq else 2015
                         acq_cii = Decimal(str(cg_params.cii.get(acq_year, 100)))
-                        cur_cii = Decimal(str(cg_params.cii.get(2025, 376)))
+                        cur_cii = Decimal(str(cg_params.cii[params.year]))
                         indexed_cost = item.cost_of_acquisition * (cur_cii / acq_cii)
                         indexed_gain = max(
                             Decimal("0"),
@@ -409,7 +461,7 @@ class IncomeComputationService:
                                 f"Property LTCG indexation option: 20% indexed tax ({tax_indexed}) < 12.5% unindexed ({tax_unindexed}); indexed option chosen"
                             )
                             # To fit in ltcg_112 bucket at 12.5%, set effective gain so 12.5% matches tax_indexed:
-                            ltcg_112 += (tax_indexed / Decimal("0.125"))
+                            ltcg_112 += (tax_indexed / cg_params.ltcg_112_rate)
                         else:
                             trace.append(
                                 f"Property LTCG 12.5% unindexed tax ({tax_unindexed}) <= 20% indexed ({tax_indexed}); 12.5% chosen"
@@ -419,6 +471,40 @@ class IncomeComputationService:
                         ltcg_112 += gain
                 else:
                     stcg_slab += gain
+
+        # Sections 70 & 74: long-term losses absorb only long-term gains; short-term
+        # losses absorb any gain. Buckets are applied highest tax rate first.
+        gains = {
+            "stcg_slab": max(Decimal("0"), stcg_slab),
+            "stcg_111a": max(Decimal("0"), stcg_111a),
+            "ltcg_112": max(Decimal("0"), ltcg_112),
+            "ltcg_112a": max(Decimal("0"), ltcg_112a_gross),
+        }
+
+        def absorb(loss: Decimal, buckets: tuple[str, ...]) -> Decimal:
+            for key in buckets:
+                used = min(loss, gains[key])
+                gains[key] -= used
+                loss -= used
+            return loss
+
+        lt_loss = absorb(
+            -(min(Decimal("0"), ltcg_112) + min(Decimal("0"), ltcg_112a_gross)),
+            ("ltcg_112", "ltcg_112a"),
+        )
+        st_loss = absorb(
+            -(min(Decimal("0"), stcg_slab) + min(Decimal("0"), stcg_111a)),
+            ("stcg_slab", "stcg_111a", "ltcg_112", "ltcg_112a"),
+        )
+        cg_loss_carried_forward = st_loss + lt_loss
+        if cg_loss_carried_forward > Decimal("0"):
+            trace.append(
+                f"Capital losses carried forward u/s 74: short-term {st_loss}, long-term {lt_loss}"
+            )
+        stcg_slab = gains["stcg_slab"]
+        stcg_111a = gains["stcg_111a"]
+        ltcg_112 = gains["ltcg_112"]
+        ltcg_112a_gross = gains["ltcg_112a"]
 
         # 112A exemption: first ₹1,25,000 exempt across all items
         ltcg_112a_exempt = min(max(Decimal("0"), ltcg_112a_gross), cg_params.ltcg_112a_exemption)
@@ -432,14 +518,11 @@ class IncomeComputationService:
         # -------------------------------------------------------------
         # 5. INCOME FROM OTHER SOURCES
         # -------------------------------------------------------------
-        # Family pension standard deduction u/s 57(iia)
+        # Family pension standard deduction u/s 57(iia): 1/3 or cap, whichever is less
         family_pension_ded = Decimal("0")
         if data.family_pension > Decimal("0"):
-            if regime == Regime.NEW:
-                family_pension_ded = min(data.family_pension, reg_params.family_pension_deduction)
-            else:
-                one_third = (data.family_pension / Decimal("3")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-                family_pension_ded = min(one_third, reg_params.family_pension_deduction)
+            one_third = (data.family_pension / Decimal("3")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            family_pension_ded = min(one_third, reg_params.family_pension_deduction)
 
         other_sources_income = (
             data.savings_interest
@@ -454,11 +537,13 @@ class IncomeComputationService:
         # -------------------------------------------------------------
         # 6. GROSS TOTAL INCOME (GTI)
         # -------------------------------------------------------------
+        # Section 71(3): Net loss under Capital Gains cannot be set off against any other head
+        capital_gains_for_gti = max(Decimal("0"), capital_gains_total)
         gross_total_income = (
             income_from_salary
             + hp_net_for_gti
             + business_income
-            + capital_gains_total
+            + capital_gains_for_gti
             + other_sources_income
         )
         trace.append(f"Gross Total Income (GTI): {gross_total_income}")
@@ -502,6 +587,8 @@ class IncomeComputationService:
             ltcg_112a_taxable=ltcg_112a_taxable,
             ltcg_112=ltcg_112,
             capital_gains_total=capital_gains_total,
+            cg_loss_carried_forward=cg_loss_carried_forward,
+            winnings_115bb=data.winnings_115bb,
             other_sources_income=other_sources_income,
             gross_total_income=gross_total_income,
             chapter_via=applied_via,

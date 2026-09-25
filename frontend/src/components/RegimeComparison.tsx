@@ -1,46 +1,79 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { RegimeComparison } from "../types/tax";
 import { formatINR } from "../utils/inr";
+import { getSensitivity } from "../api/submissions";
 
 interface Props {
   comparison: RegimeComparison;
+  submissionId?: string;
+  assessmentYear?: string;
+  financialYear?: string;
 }
 
-export function RegimeComparisonView({ comparison }: Props) {
+export function RegimeComparisonView({ comparison, submissionId, assessmentYear, financialYear }: Props) {
   const { old: oldRes, new: newRes, recommended, savings, deltas, breakeven_deduction_amount, deductions_forfeited_if_new, reasons } = comparison;
   const isNew = recommended === "new";
   const numSavings = typeof savings === "number" ? savings : parseFloat(String(savings));
 
-  // Interactive sensitivity slider
   const [extraDeduction, setExtraDeduction] = useState(0);
-
-  // Approximate sensitivity tax adjustment (marginal rate 31.2% or 20.8%)
-  const marginalRate = parseFloat(String(oldRes.income.gross_total_income)) > 1000000 ? 0.312 : 0.208;
-  const simulatedOldTax = Math.max(0, Math.round(parseFloat(String(oldRes.total_tax_liability)) - extraDeduction * marginalRate));
+  const baseOldTax = Math.round(parseFloat(String(oldRes.total_tax_liability)));
   const newTaxNum = Math.round(parseFloat(String(newRes.total_tax_liability)));
-  const simulatedSavings = newTaxNum - simulatedOldTax;
+  const [simulatedOldTax, setSimulatedOldTax] = useState<number>(baseOldTax);
+  const [_calculating, setCalculating] = useState(false);
+
+  useEffect(() => {
+    if (!submissionId || extraDeduction === 0) {
+      setSimulatedOldTax(baseOldTax);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        setCalculating(true);
+        const results = await getSensitivity(submissionId, [extraDeduction]);
+        if (results && results.length > 0) {
+          setSimulatedOldTax(Math.round(results[0].old_tax));
+        }
+      } catch (err) {
+        const marginalRate = parseFloat(String(oldRes.income.gross_total_income)) > 1000000 ? 0.312 : 0.208;
+        setSimulatedOldTax(Math.max(0, Math.round(baseOldTax - extraDeduction * marginalRate)));
+      } finally {
+        setCalculating(false);
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [submissionId, extraDeduction, baseOldTax, oldRes.income.gross_total_income]);
+
+  const simulatedSavings = simulatedOldTax - newTaxNum;
 
   return (
     <div className="regime-comparison-container">
-      {/* 1. Recommendation Banner */}
+      {/* Recommendation Banner */}
       <div className={`recommendation-banner ${isNew ? "banner-new" : "banner-old"}`}>
         <div className="banner-left">
-          <span className="badge-recommendation">RECOMMENDED FILING CHOICE</span>
+          <span className="badge-recommendation">Recommended Filing Choice</span>
           <h2>
-            {isNew ? "New Tax Regime (Section 115BAC)" : "Old Tax Regime (With Deductions)"}
+            {isNew ? "New Tax Regime" : "Old Tax Regime"}
+            <span className="banner-h2-sub">
+              {isNew ? " · Section 115BAC" : " · With deductions"}
+            </span>
           </h2>
           <p className="banner-savings">
             {numSavings > 0 ? (
               <>
-                You save <strong>{formatINR(numSavings)}</strong> by choosing the{" "}
-                <span className="highlight-regime">{isNew ? "New" : "Old"} Regime</span>.
+                Filing under this regime saves you{" "}
+                <strong>{formatINR(numSavings)}</strong> versus the alternative.
               </>
             ) : (
               "Both regimes result in identical tax liability. Defaulting to New Regime u/s 115BAC."
             )}
           </p>
           <div className="banner-tags">
-            <span className="tag-pill">AY 2026-27 (FY 2025-26)</span>
+            {(assessmentYear || financialYear) && (
+              <span className="tag-pill">
+                AY {assessmentYear}
+                {financialYear ? ` · FY ${financialYear}` : ""}
+              </span>
+            )}
             <span className="tag-pill">
               {comparison.switch_allowed_annually
                 ? "Annual switch permitted (Salaried)"
@@ -55,133 +88,52 @@ export function RegimeComparisonView({ comparison }: Props) {
           <div className="savings-pill">
             <span className="pill-label">Net Advantage</span>
             <span className="pill-val">{formatINR(numSavings)}</span>
+            <span className="pill-sub">
+              vs {isNew ? "Old" : "New"} Regime
+            </span>
           </div>
         </div>
       </div>
 
-      {/* 2. Side-by-Side Regime Cards */}
+      {/* Side-by-Side Cards */}
       <div className="regime-cards-grid">
-        {/* Old Regime Card */}
-        <div className={`regime-card ${recommended === "old" ? "card-recommended" : ""}`}>
-          <div className="card-header">
-            <div>
-              <h3>Old Tax Regime</h3>
-              <small>Retains Chapter VI-A, HRA & SOP Interest</small>
-            </div>
-            {recommended === "old" && <span className="chip-winner">Optimal</span>}
-          </div>
-          <div className="card-metrics">
-            <div className="metric-row">
-              <span>Gross Total Income:</span>
-              <strong>{formatINR(oldRes.income.gross_total_income)}</strong>
-            </div>
-            <div className="metric-row">
-              <span>Deductions & Exemptions:</span>
-              <strong className="text-deduction">
-                - {formatINR(Number(oldRes.income.chapter_via_total) + Number(oldRes.income.standard_deduction))}
-              </strong>
-            </div>
-            <div className="metric-row">
-              <span>Taxable Total Income:</span>
-              <strong>{formatINR(oldRes.income.total_income)}</strong>
-            </div>
-            <div className="metric-divider" />
-            <div className="metric-row">
-              <span>Tax before Cess:</span>
-              <span>{formatINR(oldRes.tax_after_rebate)}</span>
-            </div>
-            <div className="metric-row">
-              <span>Health & Education Cess (4%):</span>
-              <span>{formatINR(oldRes.cess)}</span>
-            </div>
-            <div className="metric-row total-liability">
-              <span>Total Tax Liability:</span>
-              <strong className="text-liability">{formatINR(oldRes.total_tax_liability)}</strong>
-            </div>
-            <div className="metric-row">
-              <span>Taxes Paid (TDS / Advance):</span>
-              <span>{formatINR(oldRes.taxes_paid_total)}</span>
-            </div>
-            <div className="metric-row final-settlement">
-              <span>{Number(oldRes.refund_due) > 0 ? "Refund Due:" : "Tax Payable:"}</span>
-              <strong className={Number(oldRes.refund_due) > 0 ? "text-refund" : "text-payable"}>
-                {Number(oldRes.refund_due) > 0 ? formatINR(oldRes.refund_due) : formatINR(oldRes.tax_payable)}
-              </strong>
-            </div>
-          </div>
-        </div>
-
-        {/* New Regime Card */}
-        <div className={`regime-card ${recommended === "new" ? "card-recommended" : ""}`}>
-          <div className="card-header">
-            <div>
-              <h3>New Regime (Sec 115BAC)</h3>
-              <small>Lower Slabs + ₹75,000 Standard Deduction</small>
-            </div>
-            {recommended === "new" && <span className="chip-winner">Optimal</span>}
-          </div>
-          <div className="card-metrics">
-            <div className="metric-row">
-              <span>Gross Total Income:</span>
-              <strong>{formatINR(newRes.income.gross_total_income)}</strong>
-            </div>
-            <div className="metric-row">
-              <span>Deductions & Exemptions:</span>
-              <strong className="text-deduction">
-                - {formatINR(Number(newRes.income.chapter_via_total) + Number(newRes.income.standard_deduction))}
-              </strong>
-            </div>
-            <div className="metric-row">
-              <span>Taxable Total Income:</span>
-              <strong>{formatINR(newRes.income.total_income)}</strong>
-            </div>
-            <div className="metric-divider" />
-            <div className="metric-row">
-              <span>Tax after Rebate (87A):</span>
-              <span>{formatINR(newRes.tax_after_rebate)}</span>
-            </div>
-            <div className="metric-row">
-              <span>Health & Education Cess (4%):</span>
-              <span>{formatINR(newRes.cess)}</span>
-            </div>
-            <div className="metric-row total-liability">
-              <span>Total Tax Liability:</span>
-              <strong className="text-liability">{formatINR(newRes.total_tax_liability)}</strong>
-            </div>
-            <div className="metric-row">
-              <span>Taxes Paid (TDS / Advance):</span>
-              <span>{formatINR(newRes.taxes_paid_total)}</span>
-            </div>
-            <div className="metric-row final-settlement">
-              <span>{Number(newRes.refund_due) > 0 ? "Refund Due:" : "Tax Payable:"}</span>
-              <strong className={Number(newRes.refund_due) > 0 ? "text-refund" : "text-payable"}>
-                {Number(newRes.refund_due) > 0 ? formatINR(newRes.refund_due) : formatINR(newRes.tax_payable)}
-              </strong>
-            </div>
-          </div>
-        </div>
+        <RegimeCard
+          title="Old Tax Regime"
+          subtitle="Chapter VI-A, HRA, home loan interest allowed"
+          isRecommended={recommended === "old"}
+          data={oldRes}
+          rebateLabel="Tax after Rebate u/s 87A"
+        />
+        <RegimeCard
+          title="New Tax Regime"
+          subtitle="Section 115BAC · concessional slabs · ₹75,000 standard deduction"
+          isRecommended={recommended === "new"}
+          data={newRes}
+          rebateLabel="Tax after Rebate u/s 87A"
+        />
       </div>
 
-      {/* 3. Interactive Breakeven & Sensitivity Analysis */}
+      {/* Breakeven + Sensitivity */}
       <div className="breakeven-card">
         <div className="breakeven-header">
           <div>
-            <h3>Deduction Breakeven & Sensitivity Analysis</h3>
+            <h4>Deduction Breakeven &amp; Sensitivity</h4>
             <p>
-              Under current laws, the Old Regime becomes optimal once your total deductions exceed{" "}
-              <strong>{formatINR(breakeven_deduction_amount)}</strong>.
+              The Old Regime becomes optimal once total deductions exceed{" "}
+              <strong>{formatINR(breakeven_deduction_amount)}</strong>. Move the slider to see how
+              extra 80C / 80D / HRA claims change the picture.
             </p>
           </div>
           <div className="breakeven-target">
-            <span>Breakeven Threshold</span>
+            <span>Breakeven</span>
             <strong>{formatINR(breakeven_deduction_amount)}</strong>
           </div>
         </div>
 
         <div className="slider-box">
-          <label htmlFor="deduction-slider">
-            What if you invested more? Simulate additional deductions:{" "}
-            <strong>+{formatINR(extraDeduction)}</strong>
+          <label htmlFor="deduction-slider" className="slider-label">
+            <span>Additional deductions to simulate</span>
+            <strong>+ {formatINR(extraDeduction)}</strong>
           </label>
           <input
             id="deduction-slider"
@@ -193,32 +145,39 @@ export function RegimeComparisonView({ comparison }: Props) {
             onChange={(e) => setExtraDeduction(Number(e.target.value))}
             className="slider-input"
           />
+          <div className="slider-scale">
+            <span>₹ 0</span>
+            <span>₹ 3 L</span>
+            <span>₹ 6 L</span>
+          </div>
           <div className="slider-results">
-            <div>
-              <span>Simulated Old Regime Tax:</span>
+            <div className="slider-result-cell">
+              <span>Simulated Old Regime Tax</span>
               <strong>{formatINR(simulatedOldTax)}</strong>
             </div>
-            <div>
-              <span>New Regime Tax:</span>
+            <div className="slider-result-cell">
+              <span>New Regime Tax</span>
               <strong>{formatINR(newTaxNum)}</strong>
             </div>
-            <div>
-              <span>Advantage:</span>
+            <div className="slider-result-cell slider-result-advantage">
+              <span>Result</span>
               <strong className={simulatedSavings >= 0 ? "text-refund" : "text-payable"}>
                 {simulatedSavings >= 0
-                  ? `New Regime by ${formatINR(simulatedSavings)}`
-                  : `Old Regime by ${formatINR(Math.abs(simulatedSavings))}`}
+                  ? `New wins by ${formatINR(simulatedSavings)}`
+                  : `Old wins by ${formatINR(Math.abs(simulatedSavings))}`}
               </strong>
             </div>
           </div>
         </div>
       </div>
 
-      {/* 4. Forfeited Deductions in New Regime */}
+      {/* Forfeited under New */}
       {deductions_forfeited_if_new && Object.keys(deductions_forfeited_if_new).length > 0 && (
         <div className="forfeited-section">
-          <h3>Deductions & Exemptions Forfeited under New Regime</h3>
-          <p>The New Regime bars these claims in exchange for concessional slab rates:</p>
+          <div className="forfeited-head">
+            <h4>Deductions Forfeited under New Regime</h4>
+            <p>These claims are unavailable if you elect Section 115BAC.</p>
+          </div>
           <div className="forfeited-grid">
             {Object.entries(deductions_forfeited_if_new).map(([desc, amt]) => (
               <div key={desc} className="forfeited-item">
@@ -230,41 +189,48 @@ export function RegimeComparisonView({ comparison }: Props) {
         </div>
       )}
 
-      {/* 5. Line-by-Line Comparison Table */}
+      {/* Line-by-Line */}
       <div className="delta-table-wrap">
-        <h3>Line-by-Line Comparison (AY 2026-27)</h3>
-        <table className="comparison-table">
-          <thead>
-            <tr>
-              <th>Particulars</th>
-              <th className="th-num">Old Regime</th>
-              <th className="th-num">New Regime</th>
-              <th className="th-num">Difference</th>
-            </tr>
-          </thead>
-          <tbody>
-            {deltas.map((d) => {
-              const diff = d.delta;
-              const isFavorable = diff < 0; // lower under new
-              return (
-                <tr key={d.line}>
-                  <td>{d.line}</td>
-                  <td className="td-num">{formatINR(d.old_value)}</td>
-                  <td className="td-num">{formatINR(d.new_value)}</td>
-                  <td className={`td-num font-bold ${diff === 0 ? "" : isFavorable ? "text-refund" : "text-payable"}`}>
-                    {diff === 0 ? "—" : `${isFavorable ? "↓ " : "↑ "}${formatINR(Math.abs(diff))}`}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <div className="delta-table-head">
+          <h4>Line-by-Line Comparison</h4>
+          <p>How each computational step differs between the two regimes.</p>
+        </div>
+        <div className="table-scroll">
+          <table className="comparison-table">
+            <thead>
+              <tr>
+                <th>Particulars</th>
+                <th className="th-num">Old Regime</th>
+                <th className="th-num">New Regime</th>
+                <th className="th-num">Difference (New − Old)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {deltas.map((d) => {
+                const diff = Number(d.delta);
+                const isFavorable = diff < 0;
+                return (
+                  <tr key={d.line}>
+                    <td>{d.line}</td>
+                    <td className="td-num">{formatINR(d.old_value)}</td>
+                    <td className="td-num">{formatINR(d.new_value)}</td>
+                    <td className={`td-num td-diff ${diff === 0 ? "" : isFavorable ? "text-refund" : "text-payable"}`}>
+                      {diff === 0
+                        ? "—"
+                        : `${isFavorable ? "▼" : "▲"} ${formatINR(Math.abs(diff))}`}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      {/* 6. Statutory Reasoning */}
+      {/* Rationale */}
       {reasons && reasons.length > 0 && (
         <div className="reasons-box">
-          <h4>Advisory Rationale & Legal Grounding</h4>
+          <h4>Advisory Rationale</h4>
           <ul>
             {reasons.map((r, i) => (
               <li key={i}>{r}</li>
@@ -272,6 +238,78 @@ export function RegimeComparisonView({ comparison }: Props) {
           </ul>
         </div>
       )}
+    </div>
+  );
+}
+
+function RegimeCard({
+  title,
+  subtitle,
+  isRecommended,
+  data,
+  rebateLabel,
+}: {
+  title: string;
+  subtitle: string;
+  isRecommended: boolean;
+  data: RegimeComparison["old"];
+  rebateLabel: string;
+}) {
+  const isRefund = Number(data.refund_due) > 0;
+  const surcharge = Number(data.surcharge);
+
+  return (
+    <div className={`regime-card ${isRecommended ? "card-recommended" : ""}`}>
+      <div className="card-header">
+        <div>
+          <h4>{title}</h4>
+          <small>{subtitle}</small>
+        </div>
+        {isRecommended && <span className="chip-winner">Optimal</span>}
+      </div>
+      <dl className="card-metrics">
+        <div className="metric-row">
+          <dt>Gross Total Income</dt>
+          <dd>{formatINR(data.income.gross_total_income)}</dd>
+        </div>
+        <div className="metric-row">
+          <dt>Chapter VI-A deductions</dt>
+          <dd className="text-deduction">− {formatINR(data.income.chapter_via_total)}</dd>
+        </div>
+        <div className="metric-row metric-row-emphasis">
+          <dt>Taxable Income</dt>
+          <dd>{formatINR(data.income.total_income)}</dd>
+        </div>
+        <div className="metric-divider" />
+        <div className="metric-row">
+          <dt>{rebateLabel}</dt>
+          <dd>{formatINR(data.tax_after_rebate)}</dd>
+        </div>
+        {surcharge > 0 && (
+          <div className="metric-row">
+            <dt>Surcharge</dt>
+            <dd>{formatINR(surcharge)}</dd>
+          </div>
+        )}
+        <div className="metric-row">
+          <dt>Health &amp; Education Cess (4%)</dt>
+          <dd>{formatINR(data.cess)}</dd>
+        </div>
+        <div className="metric-row total-liability">
+          <dt>Total Tax Liability</dt>
+          <dd>{formatINR(data.total_tax_liability)}</dd>
+        </div>
+        <div className="metric-row">
+          <dt>Taxes paid &amp; relief (TDS / Advance / Sec 89)</dt>
+          <dd>{formatINR(data.taxes_paid_total)}</dd>
+        </div>
+        <div className="metric-row final-settlement">
+          <dt>{isRefund ? "Refund due to you" : "Tax payable"}</dt>
+          <dd className={isRefund ? "text-refund" : "text-payable"}>
+            {isRefund ? formatINR(data.refund_due) : formatINR(data.tax_payable)}
+          </dd>
+        </div>
+      </dl>
     </div>
   );
 }

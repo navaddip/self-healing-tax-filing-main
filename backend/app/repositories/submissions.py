@@ -15,6 +15,10 @@ def _redact(state: dict) -> dict:
             new_extracted["ssn"] = mask_ssn(new_extracted["ssn"])
         if new_extracted.get("pan"):
             new_extracted["pan"] = mask_pan(new_extracted["pan"])
+        for field in ("bank_account_number", "mobile"):
+            value = new_extracted.get(field)
+            if value and len(value) > 4:
+                new_extracted[field] = "*" * (len(value) - 4) + value[-4:]
         state = {**state, "extracted_data": new_extracted}
     return state
 

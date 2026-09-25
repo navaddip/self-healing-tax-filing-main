@@ -71,7 +71,17 @@ def select_itr_form(data: IndianTaxpayerData, total_income: Decimal) -> tuple[IT
     if stcg_items or any(item.asset_type != "listed_equity" for item in data.capital_gains):
         disqualifications.append("Presence of Short-Term Capital Gains (STCG) or non-equity assets requires ITR-2.")
 
-    ltcg_total = sum(item.gain for item in data.capital_gains if item.is_long_term)
+    ltcg_total = sum(
+        (
+            item.sale_consideration
+            - item.transfer_expenses
+            - item.cost_of_acquisition
+            - item.cost_of_improvement
+            for item in data.capital_gains
+            if item.is_long_term
+        ),
+        Decimal("0"),
+    )
     if ltcg_total > Decimal("125000"):
         disqualifications.append(f"Long-term capital gains of ₹{ltcg_total:,.0f} exceed ₹1,25,000 exemption limit for ITR-1.")
 
@@ -108,6 +118,20 @@ def check_completeness(
     # 1. Source evidence grounding (Weight 3.0)
     grounded = True
     evidence_fields = {e.field for e in data.evidence}
+    if data.form16s and all(
+        (
+            f16.gross_salary_17_1
+            + f16.perquisites_17_2
+            + f16.profits_in_lieu_17_3
+        )
+        == Decimal("0")
+        for f16 in data.form16s
+    ):
+        grounded = False
+        hallucination_flags.append(
+            "Form 16 was detected, but no salary amount could be extracted."
+        )
+        requires_reextraction = True
     # Check key claimed numbers have evidence
     for f16 in data.form16s:
         if f16.gross_salary_17_1 > Decimal("0") and "gross_salary_17_1" not in evidence_fields and not data.evidence:
@@ -198,7 +222,8 @@ def check_completeness(
     )
 
     # 7. Due date awareness (Weight 1.0)
-    due_date = date(2026, 7, 31)
+    from app.tax_rules.params import get_params
+    due_date = get_params(data.financial_year).filing_due_date
     actual_filing = filing_date or date.today()
     due_ok = True
     if actual_filing > due_date and rec_result.fee_234f == Decimal("0") and rec_result.income.total_income > Decimal("250000"):

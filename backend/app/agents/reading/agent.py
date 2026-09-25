@@ -7,6 +7,7 @@ Applies cross-footing arithmetic checks, multi-document merging, and confidence 
 
 from __future__ import annotations
 
+import hashlib
 import re
 from decimal import Decimal
 from pathlib import Path
@@ -15,6 +16,7 @@ from typing import Any
 from app.schemas.tax import (
     AuditEntry,
     Form16,
+    HouseProperty,
     IndianTaxpayerData,
     SourceEvidence,
     TaxesPaid,
@@ -41,10 +43,10 @@ class ReadingAgent:
         self,
         documents: DocumentService | None = None,
         ocr: OCRService | None = None,
-        default_state_tax_rate: float = 0.0,
         memory: ChromaService | None = None,
-        w2_extractor: Any | None = None,
         ollama: OllamaClient | None = None,
+        *args: Any,
+        **kwargs: Any,
     ):
         self.documents = documents or DocumentService()
         self.ocr = ocr or OCRService()
@@ -67,12 +69,36 @@ class ReadingAgent:
         datas: list[IndianTaxpayerData] = []
         texts: list[str] = []
         logs: list[AuditEntry] = []
+        seen_digests: set[str] = set()
+        seen_certificates: set[tuple[str, str]] = set()
 
         for path in paths:
+            digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            if digest in seen_digests:
+                logs.append(self._skip_duplicate_log(path, "identical file uploaded more than once"))
+                continue
+            seen_digests.add(digest)
+
             data, text, page_logs = self.run(path, scale=scale)
+            certificates = {
+                (f.employer_tan, f.certificate_number)
+                for f in data.form16s
+                if f.certificate_number
+            }
+            if certificates and certificates <= seen_certificates:
+                logs.append(self._skip_duplicate_log(path, "Form 16 certificate already included"))
+                continue
+            seen_certificates |= certificates
             datas.append(data)
             texts.append(text)
             logs.extend(page_logs)
+
+        pans = {d.pan.upper() for d in datas if d.pan}
+        if len(pans) > 1:
+            raise ValueError(
+                "Uploaded documents belong to different taxpayers (PAN mismatch). "
+                "Upload documents for one PAN per submission."
+            )
 
         merged = self._merge(datas)
         if len(datas) > 1:
@@ -89,6 +115,14 @@ class ReadingAgent:
             )
         return merged, "\n".join(texts), logs
 
+    def _skip_duplicate_log(self, path: Path, reason: str) -> AuditEntry:
+        return AuditEntry(
+            agent=self.name,
+            action="skip_duplicate_document",
+            reason=f"Skipped duplicate document: {reason}",
+            details={"document": Path(path).name},
+        )
+
     def run(
         self, path: Path, scale: int = 2
     ) -> tuple[IndianTaxpayerData, str, list[AuditEntry]]:
@@ -96,54 +130,150 @@ class ReadingAgent:
         logs: list[AuditEntry] = []
         combined_text = ""
 
-        # Handle CSV directly (e.g. Broker P&L)
-        if path.suffix.lower() in (".csv", ".txt") and "pnl" in path.name.lower():
+        # Handle CSV directly (e.g. Broker P&L or Capital Gains statement)
+        if path.suffix.lower() in (".csv", ".txt"):
             try:
                 csv_content = path.read_text(encoding="utf-8")
             except Exception:
                 csv_content = path.read_text(encoding="latin-1")
-            items, ev, warnings = self.broker_parser.parse_csv(csv_content)
-            data = IndianTaxpayerData(capital_gains=items, evidence=ev)
-            logs.append(
-                AuditEntry(
-                    agent=self.name,
-                    action="extract_broker_pnl",
-                    reason=f"Parsed {len(items)} capital gain transactions",
-                    details={"items": len(items), "warnings": warnings},
-                )
+
+            is_broker_csv = "pnl" in path.name.lower() or any(
+                k in csv_content.lower() for k in ("isin", "buy value", "sell value", "realised p&l", "realized pnl", "holding period")
             )
-            return data, csv_content, logs
+            if is_broker_csv:
+                items, ev, warnings = self.broker_parser.parse_csv(csv_content)
+                data = IndianTaxpayerData(capital_gains=items, evidence=ev)
+                logs.append(
+                    AuditEntry(
+                        agent=self.name,
+                        action="extract_broker_pnl",
+                        reason=f"Parsed {len(items)} capital gain transactions",
+                        details={"items": len(items), "warnings": warnings},
+                    )
+                )
+                return data, csv_content, logs
 
         # PDF / Image loading
         pages = self.documents.load(path, scale=scale)
         page_texts: list[str] = []
         page_images = []
+        page_words = []
 
         for page in pages:
-            image_ocr = self.ocr.extract(page.image, "")
+            image_ocr = self.ocr.extract(page.image, page.embedded_text)
             text = page.embedded_text or image_ocr.text
             page_texts.append(text)
             page_images.append(page.image)
+            page_words.append(page.embedded_words or [])
 
         combined_text = "\n".join(page_texts)
+        if not combined_text.strip() and not self.ocr.available:
+            raise ValueError(
+                "A scanned document or image has no text layer and Tesseract OCR is not "
+                "installed on the server. Install Tesseract or upload a text-based PDF."
+            )
 
         # Classify document type based on header anchors
         doc_type = self._classify_document(combined_text)
+        if self.ollama and page_images and doc_type not in ("Form16", "Form26AS", "AIS"):
+            hints = self.ollama.extract_tax_fields(page_images[0], combined_text)
+            logs.append(AuditEntry(agent=self.name, action="vision_diagnostic",
+                reason="Optional local vision extraction; hints are not promoted to verified financial facts",
+                details={"returned_fields": sorted(hints)}))
 
         data = IndianTaxpayerData()
 
         if doc_type == "Form16":
-            form16, ev = self.form16_parser.parse(combined_text, page_images)
+            form16, ev = self.form16_parser.parse(
+                combined_text, page_images, page_words
+            )
             cross_foot_ok = self._verify_form16_cross_foot(form16)
             confidence = 0.98 if cross_foot_ok else 0.70
 
             for e in ev:
                 e.confidence = confidence
-                data.field_confidence[e.field_name] = confidence
+                data.field_confidence[e.field] = confidence
 
             data.form16s.append(form16)
             data.evidence.extend(ev)
             data.aggregate_form16s()
+            for section, amount in form16.chapter_via_claimed.items():
+                data.deduction_claims[section] = max(
+                    data.deduction_claims.get(section, Decimal("0")), amount
+                )
+
+            # Map reported house property loss (Row 7(a)) to self-occupied house property loan interest
+            if form16.reported_house_property_loss > Decimal("0"):
+                existing_sop_loan = sum(
+                    hp.interest_on_loan_24b
+                    for hp in data.house_properties
+                    if hp.is_self_occupied
+                )
+                if existing_sop_loan < form16.reported_house_property_loss:
+                    hp = HouseProperty(
+                        is_self_occupied=True,
+                        interest_on_loan_24b=form16.reported_house_property_loss - existing_sop_loan,
+                    )
+                    data.house_properties.append(hp)
+
+            # Row 7(b): other-sources income declared to the employer. The part backing
+            # the 80TTA claim is savings interest; the rest stays generic other income.
+            if form16.reported_other_income > Decimal("0"):
+                savings_part = min(
+                    form16.reported_savings_interest, form16.reported_other_income
+                )
+                data.savings_interest += savings_part
+                data.other_income += form16.reported_other_income - savings_part
+                logs.append(
+                    AuditEntry(
+                        agent=self.name,
+                        action="map_form16_other_income",
+                        reason="Included Form 16 row 7(b) income reported by employee under Other Sources",
+                        details={
+                            "reported_other_income": str(form16.reported_other_income),
+                            "savings_interest": str(savings_part),
+                            "other_income": str(form16.reported_other_income - savings_part),
+                        },
+                    )
+                )
+
+            # Section 80TTA compliance check
+            if "80TTA" in form16.chapter_via_claimed and form16.chapter_via_claimed["80TTA"] > Decimal("0"):
+                logs.append(
+                    AuditEntry(
+                        agent=self.name,
+                        action="advisory_check",
+                        reason="Section 80TTA deduction claimed; ensure corresponding savings bank interest is declared under Income from Other Sources",
+                        details={"claimed_80tta": str(form16.chapter_via_claimed["80TTA"])},
+                    )
+                )
+
+            # Official Form 16 tables place labels and values in separate PDF
+            # text blocks; use the parser's table-layout-aware PAN fallback.
+            employee_pan = self.form16_parser.extract_employee_pan(combined_text)
+            if employee_pan and not data.pan:
+                data.pan = employee_pan
+
+            table_employee_name = self.form16_parser.extract_employee_name(
+                page_words
+            )
+            if table_employee_name and not data.name:
+                data.name = table_employee_name
+
+            # Extract employee name
+            name_match = re.search(
+                r"Name\s*(?:and\s*Designation)?\s*of\s*the\s*Employee\s*[:\s]*([^\n\r]+)",
+                combined_text,
+                re.IGNORECASE,
+            )
+            if not name_match:
+                name_match = re.search(
+                    r"Employee\s*Name\s*[:\s]*([^\n\r]+)",
+                    combined_text,
+                    re.IGNORECASE,
+                )
+            if name_match and not data.name:
+                data.name = name_match.group(1).strip()
 
             logs.append(
                 AuditEntry(
@@ -240,7 +370,9 @@ class ReadingAgent:
 
         else:
             # Fallback: attempt Form 16 extraction
-            form16, ev = self.form16_parser.parse(combined_text, page_images)
+            form16, ev = self.form16_parser.parse(
+                combined_text, page_images, page_words
+            )
             if form16.gross_salary_17_1 > Decimal("0"):
                 data.form16s.append(form16)
                 data.evidence.extend(ev)

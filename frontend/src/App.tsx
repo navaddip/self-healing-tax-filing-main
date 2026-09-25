@@ -18,7 +18,9 @@ async function pollUntilDone(
     if (TERMINAL.has(latest.status)) return latest;
     await new Promise((resolve) => setTimeout(resolve, 1500));
   }
-  return latest as SubmissionResult;
+  throw new Error(
+    "Processing is taking longer than expected. Reload this page later to see the result.",
+  );
 }
 
 export default function App() {
@@ -41,6 +43,18 @@ export default function App() {
       )
       .finally(() => setBusy(false));
   }, []);
+
+  function followRerun(saved: SubmissionResult) {
+    setResult(saved);
+    setError("");
+    setBusy(true);
+    pollUntilDone(saved.submission_id, setResult)
+      .then(setResult)
+      .catch((caught) =>
+        setError(caught instanceof Error ? caught.message : "Load failed"),
+      )
+      .finally(() => setBusy(false));
+  }
 
   function resetRun() {
     setFiles([]);
@@ -100,7 +114,7 @@ export default function App() {
         </p>
       </header>
 
-      <AgentPipeline status={busy ? "computing_income" : result?.status} />
+      <AgentPipeline status={busy ? "computing_income" : result?.status} result={result} />
 
       <section className="workspace">
         <form className="upload-card" onSubmit={handleSubmit}>
@@ -139,8 +153,8 @@ export default function App() {
           </label>
           {files.length > 1 && (
             <ul className="file-list">
-              {files.map((f) => (
-                <li key={f.name}>{f.name}</li>
+              {files.map((f, i) => (
+                <li key={`${f.name}-${i}`}>{f.name}</li>
               ))}
             </ul>
           )}
@@ -175,12 +189,13 @@ export default function App() {
         </aside>
       </section>
 
-      {result && <ResultPanel result={result} />}
+      {result && <ResultPanel result={result} onResubmit={followRerun} />}
 
       <footer>
-        <span>FastAPI · LangGraph · PostgreSQL · ChromaDB · React</span>
-        <span>Deterministic 1040 engine · grounded extraction</span>
+        <span>FastAPI · LangGraph · SQLite · ChromaDB · React</span>
+        <span>Deterministic Indian Tax Engine (FY 2025-26 · AY 2026-27) · Grounded Evidence</span>
       </footer>
+
     </main>
   );
 }

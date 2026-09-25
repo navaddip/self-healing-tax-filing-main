@@ -22,3 +22,18 @@ output/
 
 # OS cruft
 .DS_Store
+
+# Local environments and sensitive/generated demo inputs
+.venv/
+.venv-*/
+tmp/
+.coverage
+htmlcov/
+*.db-shm
+*.db-wal
+/audit-trail-*.json
+/filled_form_16.pdf
+/original form 16.pdf
+/test_*.pdf
+/test_*.png
+/file

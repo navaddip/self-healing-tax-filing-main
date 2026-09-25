@@ -13,7 +13,12 @@ class Settings(BaseSettings):
     ollama_coder_model: str = "qwen2.5-coder:7b"
     chroma_path: Path = Path("../storage/chroma")
     storage_root: Path = Path("../storage")
-    verification_threshold: float = 0.95
+    verification_threshold: float = 0.97
+    enable_vision: bool = False
+    checkpoint_encryption_key: str = ""
+    max_upload_bytes: int = 20 * 1024 * 1024
+    max_upload_documents: int = 10
+    retention_days: int = 7
     max_remediation_attempts: int = 2
     tax_year: str = "2025-26"
     default_regime: str = "new"

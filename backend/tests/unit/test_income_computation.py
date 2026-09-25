@@ -182,3 +182,67 @@ def test_80ccd2_survives_in_both_regimes(service, params):
     # In OLD regime: capped at 10% = 1,00,000
     res_old = service.compute(data, Regime.OLD, params)
     assert res_old.chapter_via.get("80CCD2") == Decimal("100000")
+
+
+def test_family_pension_deduction_one_third_rule(service, params):
+    # Test case A: Pension ₹60,000 -> 1/3 is ₹20,000.
+    # New Regime cap is ₹25,000 -> deduction should be ₹20,000 (not ₹25,000!).
+    # Old Regime cap is ₹15,000 -> deduction should be ₹15,000.
+    data_a = IndianTaxpayerData(family_pension=Decimal("60000"))
+    res_a_new = service.compute(data_a, Regime.NEW, params)
+    assert res_a_new.other_sources_income == Decimal("40000")  # 60,000 - 20,000
+
+    res_a_old = service.compute(data_a, Regime.OLD, params)
+    assert res_a_old.other_sources_income == Decimal("45000")  # 60,000 - 15,000
+
+    # Test case B: Pension ₹90,000 -> 1/3 is ₹30,000.
+    # New Regime cap ₹25,000 binds -> deduction is ₹25,000.
+    # Old Regime cap ₹15,000 binds -> deduction is ₹15,000.
+    data_b = IndianTaxpayerData(family_pension=Decimal("90000"))
+    res_b_new = service.compute(data_b, Regime.NEW, params)
+    assert res_b_new.other_sources_income == Decimal("65000")  # 90,000 - 25,000
+
+    res_b_old = service.compute(data_b, Regime.OLD, params)
+    assert res_b_old.other_sources_income == Decimal("75000")  # 90,000 - 15,000
+
+
+def test_capital_loss_cannot_offset_salary_under_section_71_3(service, params):
+    # Section 71(3) strictly prohibits setting off capital loss against any other head.
+    f16 = Form16(gross_salary_17_1=Decimal("1000000"))
+    cg_loss = CapitalGainItem(
+        asset_type="listed_equity",
+        acquisition_date=date(2025, 1, 1),
+        transfer_date=date(2025, 4, 1),
+        sale_consideration=Decimal("100000"),
+        cost_of_acquisition=Decimal("300000"),
+        stt_paid=True,
+    )
+    data = IndianTaxpayerData(form16s=[f16], capital_gains=[cg_loss])
+
+    # In New Regime: Salary after standard deduction = 10,00,000 - 75,000 = 9,25,000.
+    # Net capital gain is -2,00,000.
+    # GTI must remain 9,25,000 (NOT 7,25,000).
+    res_new = service.compute(data, Regime.NEW, params)
+    assert res_new.income_from_salary == Decimal("925000")
+    assert res_new.capital_gains_total == Decimal("0")
+    assert res_new.cg_loss_carried_forward == Decimal("200000")
+    assert res_new.gross_total_income == Decimal("925000")
+    assert res_new.total_income == Decimal("925000")
+
+    # In Old Regime: Salary after standard deduction = 10,00,000 - 50,000 = 9,50,000.
+    res_old = service.compute(data, Regime.OLD, params)
+    assert res_old.income_from_salary == Decimal("950000")
+    assert res_old.capital_gains_total == Decimal("0")
+    assert res_old.cg_loss_carried_forward == Decimal("200000")
+    assert res_old.gross_total_income == Decimal("950000")
+    assert res_old.total_income == Decimal("950000")
+
+
+def test_winnings_115bb_in_headwise_income(service, params):
+    data = IndianTaxpayerData(winnings_115bb=Decimal("100000"))
+    res = service.compute(data, Regime.NEW, params)
+    assert res.winnings_115bb == Decimal("100000")
+    assert res.other_sources_income == Decimal("100000")
+    assert res.gross_total_income == Decimal("100000")
+    assert res.total_income == Decimal("100000")
+

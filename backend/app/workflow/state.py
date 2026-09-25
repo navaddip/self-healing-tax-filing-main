@@ -2,6 +2,7 @@ from typing import Any, TypedDict
 
 
 class TaxWorkflowState(TypedDict, total=False):
+    financial_year: str
     submission_id: str
     original_filename: str
     upload_path: str

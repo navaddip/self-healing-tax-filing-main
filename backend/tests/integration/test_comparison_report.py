@@ -20,9 +20,15 @@ from app.schemas.tax import (
     ResidentialStatus,
     SalaryBreakup,
     SourceEvidence,
+    SubmissionResult,
     TaxesPaid,
+    VerificationResult,
+    WorkflowStatus,
 )
-from app.services.pdf.comparison_report import ComparisonReportService
+from app.services.pdf.comparison_report import (
+    ComparisonReportService,
+    ProfessionalReportService,
+)
 from app.services.pdf.style import inr, inr_words
 from app.tax_rules.params import get_params
 
@@ -125,12 +131,47 @@ def test_golden_case_1_pdf_generation(tmp_path):
 
     # Page 1 checks
     page1_text = doc[0].get_text()
-    assert "Recommended: OLD REGIME" in page1_text
+    assert "RECOMMENDED: OLD REGIME" in page1_text
     assert "23,380" in page1_text  # Correct Indian digit grouping
-    assert "REFUND DUE" in page1_text
+    assert "Old Regime" in page1_text
+    assert "Refund Due" in page1_text
 
     # Check footer disclaimer on every page
     for i in range(8):
         page_text = doc[i].get_text()
-        assert "Computer-generated advisory. Not tax advice." in page_text
+        assert "Technology Meets Compliance" in page_text
         assert f"Page {i + 1} of 8" in page_text
+
+    # The downloadable filing package appends the exact uploaded Form 16 after
+    # the eight-page advisory, making the source document the final page.
+    source_path = tmp_path / "uploaded_form16.pdf"
+    source = fitz.open()
+    source_page = source.new_page()
+    source_page.insert_text((72, 72), "UPLOADED FORM 16 SOURCE")
+    source.save(source_path)
+    source.close()
+
+    final_path = tmp_path / "tax_filing_package.pdf"
+    result = SubmissionResult(
+        submission_id="SUB-CASE-1",
+        status=WorkflowStatus.COMPLETED,
+        original_filename=source_path.name,
+        extracted_data=data,
+        comparison=comparison,
+        verification=VerificationResult(
+            valid=True,
+            confidence_score=0.98,
+            checks=[],
+        ),
+    )
+    # Mirror the real workflow boundary where state is serialized to JSON and
+    # Decimal values inside the free-form comparison delta rows become strings.
+    persisted_result = SubmissionResult.model_validate(
+        result.model_dump(mode="json")
+    )
+    ProfessionalReportService().run(persisted_result, final_path, source_path)
+
+    final_doc = fitz.open(final_path)
+    assert final_doc.page_count == 9
+    assert "UPLOADED FORM 16 SOURCE" in final_doc[-1].get_text()
+    assert "RECOMMENDED: OLD REGIME" in final_doc[0].get_text()

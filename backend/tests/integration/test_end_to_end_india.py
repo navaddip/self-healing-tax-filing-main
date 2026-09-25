@@ -25,7 +25,7 @@ from app.agents.verification.completeness import select_itr_form
 from app.itr.itr1_builder import ITR1Builder
 from app.itr.itr2_builder import ITR2Builder
 from app.itr.itr4_builder import ITR4Builder
-from app.itr.schema_loader import validate_itr_json
+from app.itr.schema_loader import validate_itr_json, SchemaValidationError
 from app.schemas.tax import ITRForm, Regime
 from app.services.pdf.comparison_report import ComparisonReportService
 from app.synthetic import (
@@ -73,9 +73,8 @@ def test_e2e_fresher(engines, tmp_path):
     assert form == ITRForm.ITR1
 
     builder = ITR1Builder()
-    payload = builder.build(data, res_new, engines["params"], "SUB-FRESHER")
-    valid, errors = validate_itr_json("ITR-1", payload)
-    assert valid is True, f"ITR-1 errors: {errors}"
+    with pytest.raises(SchemaValidationError, match="ITR export blocked"):
+        builder.build(data, res_new, engines["params"], "SUB-FRESHER")
 
 
 def test_e2e_mid_career_golden_case(engines, tmp_path):
@@ -112,9 +111,8 @@ def test_e2e_mid_career_golden_case(engines, tmp_path):
     # ITR-1 JSON
     form, _ = select_itr_form(data, res_old.income.total_income)
     assert form == ITRForm.ITR1
-    payload = ITR1Builder().build(data, res_old, engines["params"], "SUB-MID")
-    valid, errors = validate_itr_json("ITR-1", payload)
-    assert valid is True, f"Errors: {errors}"
+    with pytest.raises(SchemaValidationError, match="ITR export blocked"):
+        ITR1Builder().build(data, res_old, engines["params"], "SUB-MID")
 
 
 def test_e2e_senior_pensioner(engines):
@@ -143,10 +141,8 @@ def test_e2e_trader_itr2(engines):
     assert form == ITRForm.ITR2
     assert any("capital gain" in r.lower() for r in reasons)
 
-    payload = ITR2Builder().build(data, res_new, engines["params"], "SUB-TRADER")
-    assert "ScheduleCG" in payload["ITR"]["ITR2"]
-    valid, errors = validate_itr_json("ITR-2", payload)
-    assert valid is True, f"ITR-2 errors: {errors}"
+    with pytest.raises(SchemaValidationError, match="ITR export blocked"):
+        ITR2Builder().build(data, res_new, engines["params"], "SUB-TRADER")
 
 
 def test_e2e_freelancer_44ada_itr4(engines):
@@ -159,10 +155,8 @@ def test_e2e_freelancer_44ada_itr4(engines):
     assert form == ITRForm.ITR4
     assert any("44AD" in r or "44ADA" in r for r in reasons)
 
-    payload = ITR4Builder().build(data, res_new, engines["params"], "SUB-FREELANCE")
-    assert "ScheduleBP" in payload["ITR"]["ITR4"]["IncomeDeductions"]
-    valid, errors = validate_itr_json("ITR-4", payload)
-    assert valid is True, f"ITR-4 errors: {errors}"
+    with pytest.raises(SchemaValidationError, match="ITR export blocked"):
+        ITR4Builder().build(data, res_new, engines["params"], "SUB-FREELANCE")
 
 
 def test_e2e_landlord_multi_property(engines):

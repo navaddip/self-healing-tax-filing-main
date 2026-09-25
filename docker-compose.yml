@@ -4,9 +4,7 @@ services:
     environment:
       POSTGRES_DB: tax_filing
       POSTGRES_USER: tax
-      POSTGRES_PASSWORD: tax
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-demo-only}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -14,14 +12,45 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-
-  chromadb:
-    image: chromadb/chroma:0.5.23
-    ports:
-      - "8001:8000"
+  migrate:
+    build: ./backend
+    environment: &backend_environment
+      DATABASE_URL: postgresql+psycopg://tax:${POSTGRES_PASSWORD:-local-demo-only}@postgres:5432/tax_filing
+      STORAGE_ROOT: /data
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      API_KEY: ${API_KEY:-}
+      CHECKPOINT_ENCRYPTION_KEY: ${CHECKPOINT_ENCRYPTION_KEY:-}
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+  backend:
+    build: ./backend
+    environment: *backend_environment
     volumes:
-      - chroma_data:/chroma/chroma
-
+      - tax_storage:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+  worker:
+    build: ./backend
+    environment: *backend_environment
+    volumes:
+      - tax_storage:/data
+    command: ["python", "-m", "app.services.jobs"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  frontend:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      - backend
 volumes:
   postgres_data:
-  chroma_data:
+  tax_storage:

@@ -6,9 +6,9 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.schemas.validators import AgeBand, mask_pan
+from app.schemas.validators import AgeBand, mask_pan, validate_ifsc
 
 
 class Regime(StrEnum):
@@ -93,6 +93,11 @@ class Form16(BaseModel):
     regime_used: Regime = Regime.NEW
     tds_deducted: Decimal = Decimal("0")
     taxable_salary_per_employer: Decimal = Decimal("0")
+    reported_house_property_loss: Decimal = Decimal("0")
+    reported_other_income: Decimal = Decimal("0")
+    # Gross amount of the 80TTA row, i.e. the savings interest the deduction was computed on.
+    reported_savings_interest: Decimal = Decimal("0")
+    relief_89: Decimal = Decimal("0")
 
     @field_validator(
         "gross_salary_17_1",
@@ -103,6 +108,10 @@ class Form16(BaseModel):
         "entertainment_allowance",
         "tds_deducted",
         "taxable_salary_per_employer",
+        "reported_house_property_loss",
+        "reported_other_income",
+        "reported_savings_interest",
+        "relief_89",
         mode="before",
     )
     @classmethod
@@ -150,6 +159,12 @@ class HouseProperty(BaseModel):
     principal_repaid_80c: Decimal = Decimal("0")
     is_let_out: bool = False
     co_owner_share: Decimal = Decimal("1")
+
+    @model_validator(mode="after")
+    def _let_out_is_not_self_occupied(self) -> "HouseProperty":
+        if self.is_let_out:
+            self.is_self_occupied = False
+        return self
 
     @field_validator(
         "annual_rent_received",
@@ -255,6 +270,21 @@ class TaxesPaid(BaseModel):
         return {k: _to_decimal(val) for k, val in v.items()}
 
 
+class DonationClaim(BaseModel):
+    amount: Decimal = Field(ge=0)
+    percentage: int = Field(default=50)
+    qualifying_limit: bool = True
+    cash: bool = False
+    eligible: bool = False
+
+    @field_validator("percentage")
+    @classmethod
+    def valid_percentage(cls, value):
+        if value not in (50, 100):
+            raise ValueError("Donation percentage must be 50 or 100")
+        return value
+
+
 class IndianTaxpayerData(BaseModel):
     # Identity
     name: str = ""
@@ -268,6 +298,25 @@ class IndianTaxpayerData(BaseModel):
     address: str = ""
     bank_account_last4: str = ""
     bank_ifsc: str = ""
+    bank_account_number: str = ""
+    bank_name: str = ""
+    bank_account_type: str = "SB"  # CBDT: SB, CA, CC, OD, NRO, OTH
+    father_name: str = ""
+    city: str = ""
+    state_code: str = ""
+    pin_code: str = ""
+    locality_or_area: str = ""
+    country_code_mobile: str = "91"
+    employer_category: str = ""  # CBDT: CGOV, SGOV, PSU, PE, PESG, PEPS
+    verification_capacity: str = "S"  # CBDT: S (Self) or R (Representative)
+    verification_place: str = ""
+    filing_date: date | None = None
+    health_self_family: Decimal | None = Field(default=None, ge=0)
+    health_parents: Decimal | None = Field(default=None, ge=0)
+    health_self_family_senior: bool = False
+    health_parents_senior: bool = False
+    education_loan_first_repayment_fy: int | None = None
+    donations: list[DonationClaim] = Field(default_factory=list)
     assessment_year: str = "2026-27"
     financial_year: str = "2025-26"
 
@@ -324,11 +373,19 @@ class IndianTaxpayerData(BaseModel):
     def masked_pan(self) -> str:
         return mask_pan(self.pan)
 
+    @property
+    def tax_year(self) -> str:
+        """Backwards-compatible alias for financial_year."""
+        return self.financial_year
+
     def aggregate_form16s(self) -> None:
         """Fold multiple Form 16s into salary totals and taxes paid."""
         total_tds = sum((f.tds_deducted for f in self.form16s), Decimal("0"))
         if total_tds > Decimal("0"):
             self.taxes_paid.tds_salary = total_tds
+        total_relief = sum((f.relief_89 for f in self.form16s), Decimal("0"))
+        if total_relief > Decimal("0"):
+            self.taxes_paid.relief_89 = total_relief
 
 
 # Alias for compatibility with existing imports
@@ -353,6 +410,8 @@ class HeadwiseIncome(BaseModel):
     ltcg_112a_taxable: Decimal = Decimal("0")
     ltcg_112: Decimal = Decimal("0")
     capital_gains_total: Decimal = Decimal("0")
+    cg_loss_carried_forward: Decimal = Decimal("0")
+    winnings_115bb: Decimal = Decimal("0")
     other_sources_income: Decimal = Decimal("0")
     gross_total_income: Decimal = Decimal("0")
     chapter_via: dict[str, Decimal] = Field(default_factory=dict)
@@ -377,6 +436,7 @@ class RegimeTaxResult(BaseModel):
     regime: Regime
     income: HeadwiseIncome
     tax_on_slab_income: Decimal = Decimal("0")
+    slab_components: list[dict[str, Any]] = Field(default_factory=list)
     tax_on_special_income: Decimal = Decimal("0")
     tax_before_rebate: Decimal = Decimal("0")
     rebate_87a: Decimal = Decimal("0")
@@ -394,6 +454,7 @@ class RegimeTaxResult(BaseModel):
     refund_due: Decimal = Decimal("0")
     tax_payable: Decimal = Decimal("0")
     effective_tax_rate: Decimal = Decimal("0")
+    effective_tax_rate_basis: str = "total tax liability / taxable income"
     trace: list[str] = Field(default_factory=list)
 
 
@@ -405,6 +466,7 @@ class RegimeComparison(BaseModel):
     savings_pct: Decimal = Decimal("0")
     deltas: list[dict[str, Any]] = Field(default_factory=list)
     deductions_forfeited_if_new: dict[str, Decimal] = Field(default_factory=dict)
+    current_old_total_reductions: Decimal = Decimal("0")
     breakeven_deduction_amount: Decimal = Decimal("0")
     unused_80c_headroom: Decimal = Decimal("0")
     switch_allowed_annually: bool = True
@@ -440,6 +502,64 @@ class AuditEntry(BaseModel):
     )
 
 
+class FilingDetails(BaseModel):
+    """Taxpayer-supplied details the ITR needs but a Form 16 never contains."""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    date_of_birth: date | None = None
+    employer_category: Literal["CGOV", "SGOV", "PSU", "PE", "PESG", "PEPS", "PEO", "OTH", "NA"] | None = None
+    address: str | None = Field(default=None, max_length=50)
+    locality_or_area: str | None = Field(default=None, max_length=50)
+    city: str | None = Field(default=None, max_length=50)
+    state_code: str | None = Field(default=None, pattern=r"^\d{2}$")
+    pin_code: str | None = Field(default=None, pattern=r"^[1-9]\d{5}$")
+    mobile: str | None = Field(default=None, pattern=r"^[6-9]\d{9}$")
+    email: str | None = Field(default=None, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", max_length=125)
+    bank_ifsc: str | None = None
+    bank_name: str | None = Field(default=None, max_length=125)
+    bank_account_number: str | None = Field(default=None, pattern=r"^\d{9,18}$")
+    father_name: str | None = Field(default=None, max_length=125)
+    verification_place: str | None = Field(default=None, max_length=50)
+
+    @field_validator("date_of_birth")
+    @classmethod
+    def _dob_in_past(cls, v: date | None) -> date | None:
+        if v and not date(1900, 1, 1) <= v < date.today():
+            raise ValueError("Date of birth must be a past date after 1900")
+        return v
+
+    @field_validator("state_code")
+    @classmethod
+    def _state(cls, v: str | None) -> str | None:
+        if v and not (1 <= int(v) <= 37 or v == "99"):
+            raise ValueError("Unknown state code")
+        return v
+
+    @field_validator("bank_ifsc")
+    @classmethod
+    def _ifsc(cls, v: str | None) -> str | None:
+        if v:
+            v = v.upper()
+            if not validate_ifsc(v):
+                raise ValueError("IFSC must look like HDFC0001234")
+        return v
+
+    def provided(self) -> dict[str, Any]:
+        return {k: v for k, v in self.model_dump().items() if v not in (None, "")}
+
+
+def age_band_on(dob: date, fy_start_year: int) -> AgeBand:
+    """Age band for a financial year: age reached by 31 March of the FY end."""
+    fy_end = date(fy_start_year + 1, 3, 31)
+    age = fy_end.year - dob.year - ((fy_end.month, fy_end.day) < (dob.month, dob.day))
+    if age >= 80:
+        return AgeBand.SUPER_SENIOR_80_PLUS
+    if age >= 60:
+        return AgeBand.SENIOR_60_80
+    return AgeBand.BELOW_60
+
+
 class FilingReceipt(BaseModel):
     submission_id: str
     reference_number: str
@@ -451,10 +571,12 @@ class FilingReceipt(BaseModel):
     payload_hash: str | None = None
     acknowledgement_id: str | None = None
     instructions: str | None = None
+    export_supported: bool = True
 
 
 class SubmissionResult(BaseModel):
     submission_id: str
+    serial_no: int | None = None
     status: WorkflowStatus
     original_filename: str
     extracted_data: IndianTaxpayerData | None = None
@@ -463,7 +585,16 @@ class SubmissionResult(BaseModel):
     audit_trail: list[AuditEntry] = Field(default_factory=list)
     receipt: FilingReceipt | None = None
     report_url: str | None = None
+    itr_json_url: str | None = None
+    audit_url: str | None = None
     error: str | None = None
+    missing_filing_fields: list[str] = Field(default_factory=list)
+
+
+    @property
+    def calculation(self) -> RegimeComparison | None:
+        """Backwards-compatible alias for comparison."""
+        return self.comparison
 
 
 # Backwards compatibility aliases

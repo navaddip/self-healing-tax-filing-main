@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>TaxFlow Architecture</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{width:1920px;height:1220px;background:#f6f8fc;font-family:"Segoe UI",Arial,sans-serif;color:#1c2536;position:relative;overflow:hidden}
+.abs{position:absolute}
+h1{font-size:40px;font-weight:800;letter-spacing:.5px;color:#10224a}
+.sub{font-size:19px;color:#44506a;margin-top:4px}
+.panel{position:absolute;border-radius:16px;background:#fff;border:2px solid #d5dcea;box-shadow:0 3px 10px rgba(20,40,90,.07)}
+.ptitle{font-size:17px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;padding:10px 16px;border-radius:14px 14px 0 0;color:#fff}
+.node{position:absolute;border-radius:12px;background:#fff;border:2px solid;padding:9px 10px 8px;box-shadow:0 2px 6px rgba(0,0,0,.06)}
+.node .t{font-weight:800;font-size:15px;white-space:nowrap;display:flex;align-items:center;gap:7px}
+.node .d{font-size:12.5px;color:#4a5570;margin-top:5px;line-height:1.3}
+.num{display:inline-flex;width:24px;height:24px;border-radius:50%;color:#fff;font-size:13px;font-weight:800;align-items:center;justify-content:center;flex:none}
+ul{list-style:none}
+li{font-size:13.5px;line-height:1.35;padding:3px 0 3px 18px;position:relative;color:#2d3850}
+li:before{content:"";position:absolute;left:4px;top:10px;width:7px;height:7px;border-radius:50%;background:var(--c,#3b6fd8)}
+.chip{display:inline-block;font-size:12px;font-weight:600;padding:3px 9px;border-radius:20px;margin:3px 3px 0 0;background:#eef2fa;color:#2a3a5e;border:1px solid #d8e0f0}
+.lbl{font-size:12.5px;font-weight:800;background:#f6f8fc;padding:1px 6px;border-radius:6px}
+.store{position:absolute;top:58px;height:118px;border-radius:12px;padding:10px 12px;border:2px solid #cfd8ea;background:#fafcff}
+.store .t{font-weight:800;font-size:15px}
+.store .d{font-size:12.5px;color:#4a5570;margin-top:5px;line-height:1.35}
+.icon{font-size:26px}
+</style></head><body>
+
+<!-- HEADER -->
+<div class="abs" style="left:40px;top:22px">
+  <h1>TaxFlow India &mdash; System Architecture</h1>
+  <div class="sub">Upload a Form 16 &rarr; agents extract, compute both tax regimes, verify and repair their own mistakes &rarr; advisory report + ITR-ready JSON</div>
+</div>
+<div class="abs" style="right:40px;top:30px;text-align:right">
+  <span class="chip" style="background:#e7f6ec;border-color:#b9e3c6;color:#1f6b3a">FY 2025-26 / AY 2026-27</span>
+  <span class="chip" style="background:#fff3e2;border-color:#f5d3a2;color:#8a5200">Self-healing: max 2 repair loops</span><br>
+  <span class="chip">Runs locally &middot; no live portal filing</span>
+</div>
+
+<!-- 1. USER / FRONTEND -->
+<div class="panel" style="left:30px;top:120px;width:270px;height:450px">
+  <div class="ptitle" style="background:#2f5fd0">&#9312; Taxpayer + Web App</div>
+  <div style="padding:12px 16px">
+    <div style="display:flex;gap:10px;align-items:center"><span class="icon">&#128100;</span><div style="font-size:14px;font-weight:700">Salaried taxpayer</div></div>
+    <div style="margin-top:8px;font-size:13px;color:#4a5570">Uploads documents:</div>
+    <div><span class="chip">Form 16</span><span class="chip">Form 26AS</span><span class="chip">AIS</span><span class="chip">PDF / scan</span></div>
+    <div style="margin-top:12px;font-size:14px;font-weight:800;color:#2f5fd0">React + TypeScript UI</div>
+    <ul style="--c:#2f5fd0;margin-top:4px">
+      <li>Drag-and-drop upload</li>
+      <li>Live progress per agent</li>
+      <li>Old vs New regime result</li>
+      <li>&ldquo;What-if&rdquo; deduction slider</li>
+      <li>Download report &amp; ITR JSON</li>
+      <li>View full audit trail</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 2. API -->
+<div class="panel" style="left:330px;top:120px;width:240px;height:450px">
+  <div class="ptitle" style="background:#0e7c86">&#9313; FastAPI Backend</div>
+  <div style="padding:12px 14px">
+    <div style="font-size:12.5px;font-family:Consolas,monospace;line-height:1.6;color:#0b4f55;background:#effafa;border:1px solid #c7e9ea;border-radius:8px;padding:8px">
+      POST /submissions<br>GET &nbsp;/{id} &nbsp;(status)<br>GET &nbsp;/{id}/report<br>GET &nbsp;/{id}/itr-json<br>GET &nbsp;/{id}/audit<br>POST /{id}/sensitivity<br>POST /{id}/cancel
+    </div>
+    <ul style="--c:#0e7c86;margin-top:8px">
+      <li>File type &amp; size validation</li>
+      <li>Job queue + background worker</li>
+      <li>Heartbeat &amp; cancel support</li>
+      <li>Returns 202 &rarr; UI polls status</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 3. PIPELINE PANEL -->
+<div class="panel" style="left:600px;top:120px;width:1010px;height:450px;border-color:#b9c6e4">
+  <div class="ptitle" style="background:linear-gradient(90deg,#1d3f8f,#4a2f9a)">&#9314; LangGraph Multi-Agent Pipeline &nbsp;<span style="font-weight:600;text-transform:none;letter-spacing:0;font-size:14px;opacity:.9">&mdash; every agent reads &amp; updates one shared state</span></div>
+</div>
+
+<!-- pipeline nodes: columns x = 622, 822, 1022, 1222, 1422 ; width 168 -->
+<div class="node" style="left:622px;top:190px;width:168px;height:118px;border-color:#2f5fd0">
+  <div class="t"><span class="num" style="background:#2f5fd0">1</span>Reading Agent</div>
+  <div class="d">PDF text + OCR, parses Form 16 tables, tags the source of every value</div>
+</div>
+<div class="node" style="left:822px;top:190px;width:168px;height:118px;border-color:#1f8a4c">
+  <div class="t"><span class="num" style="background:#1f8a4c">2</span>Income Agent</div>
+  <div class="d">Builds salary, house property &amp; other-source income; applies exemptions</div>
+</div>
+<div class="node" style="left:1022px;top:180px;width:168px;height:62px;border-color:#1f8a4c">
+  <div class="t" style="font-size:14.5px"><span class="num" style="background:#1f8a4c">3</span>Old Regime Tax</div>
+  <div class="d" style="margin-top:2px">Slabs + all deductions</div>
+</div>
+<div class="node" style="left:1022px;top:256px;width:168px;height:62px;border-color:#1f8a4c">
+  <div class="t" style="font-size:14.5px"><span class="num" style="background:#1f8a4c">4</span>New Regime Tax</div>
+  <div class="d" style="margin-top:2px">New slabs + 87A relief</div>
+</div>
+<div class="node" style="left:1222px;top:190px;width:168px;height:118px;border-color:#1f8a4c">
+  <div class="t"><span class="num" style="background:#1f8a4c">5</span>Comparison</div>
+  <div class="d">Picks the cheaper regime, savings &amp; break-even deduction</div>
+</div>
+<div class="node" style="left:1422px;top:190px;width:168px;height:118px;border-color:#7a3fd0;background:#faf7ff">
+  <div class="t"><span class="num" style="background:#7a3fd0">6</span>Verification</div>
+  <div class="d">Independent recompute + audit gates. Pass only if score &ge; 0.95</div>
+</div>
+
+<div class="node" style="left:1422px;top:395px;width:168px;height:92px;border-color:#128a6e;background:#f2fbf8">
+  <div class="t"><span class="num" style="background:#128a6e">8</span>Documentation</div>
+  <div class="d">Report PDF, ITR JSON, receipt, audit log</div>
+</div>
+<div class="node" style="left:1422px;top:500px;width:168px;height:52px;border-color:#8a94a8;background:#f3f5f9;padding:6px 10px">
+  <div class="t" style="font-size:14px">&#128104;&#8205;&#128188; Manual review</div>
+  <div class="d" style="margin-top:1px;font-size:11.5px">still failing after 2 repairs</div>
+</div>
+
+<div class="node" style="left:1000px;top:400px;width:300px;height:132px;border-color:#e07b12;background:#fff9f1">
+  <div class="t"><span class="num" style="background:#e07b12">7</span>Remediation Agent <span style="font-size:11px;background:#e07b12;color:#fff;border-radius:10px;padding:1px 7px">SELF-HEALING</span></div>
+  <div class="d">Reads which checks failed and fixes them:<br>&bull; wrong extraction &rarr; <b>re-read document</b><br>&bull; cap breach / mismatch &rarr; <b>fix &amp; recompute</b><br>&bull; wrong ITR form &rarr; re-select form</div>
+</div>
+
+<!-- decision diamond -->
+<div class="abs" style="left:1488px;top:327px;width:36px;height:36px;transform:rotate(45deg);background:#7a3fd0;border-radius:5px"></div>
+<div class="abs" style="left:1494px;top:333px;width:24px;text-align:center;color:#fff;font-weight:800;font-size:15px;line-height:24px">?</div>
+
+<!-- 4. OUTPUTS -->
+<div class="panel" style="left:1640px;top:120px;width:250px;height:450px">
+  <div class="ptitle" style="background:#128a6e">&#9315; Outputs</div>
+  <div style="padding:10px 14px">
+    <div style="display:flex;gap:10px;align-items:flex-start;margin-top:4px"><span class="icon">&#128202;</span><div><b style="font-size:14.5px">Regime advice</b><div style="font-size:12.5px;color:#4a5570">Old vs New tax, savings, break-even</div></div></div>
+    <div style="display:flex;gap:10px;align-items:flex-start;margin-top:12px"><span class="icon">&#128196;</span><div><b style="font-size:14.5px">Advisory report (PDF)</b><div style="font-size:12.5px;color:#4a5570">Step-by-step computation</div></div></div>
+    <div style="display:flex;gap:10px;align-items:flex-start;margin-top:12px"><span class="icon">&#129534;</span><div><b style="font-size:14.5px">ITR-1 / ITR-2 / ITR-4 JSON</b><div style="font-size:12.5px;color:#4a5570">Validated against CBDT schema, for offline utility</div></div></div>
+    <div style="display:flex;gap:10px;align-items:flex-start;margin-top:12px"><span class="icon">&#128269;</span><div><b style="font-size:14.5px">Audit trail</b><div style="font-size:12.5px;color:#4a5570">Every agent action, fix and reason</div></div></div>
+    <div style="display:flex;gap:10px;align-items:flex-start;margin-top:12px"><span class="icon">&#9989;</span><div><b style="font-size:14.5px">Verification score</b><div style="font-size:12.5px;color:#4a5570">Pass / fail per check</div></div></div>
+  </div>
+</div>
+
+<!-- SUPPORT ROW -->
+<div class="panel" style="left:30px;top:600px;width:540px;height:225px">
+  <div class="ptitle" style="background:#56627a">Safety &amp; operations</div>
+  <div style="padding:10px 16px;display:grid;grid-template-columns:1fr 1fr;gap:0 14px">
+    <ul style="--c:#56627a">
+      <li>PAN masked in outputs</li>
+      <li>Optional encrypted checkpoints</li>
+      <li>Retention job purges old files</li>
+      <li>Tax data never leaves the machine</li>
+    </ul>
+    <ul style="--c:#56627a">
+      <li>Cancel a running job anytime</li>
+      <li>Resume a run from its checkpoint</li>
+      <li>DB migrations with Alembic</li>
+      <li>Docker Compose deployment</li>
+    </ul>
+  </div>
+</div>
+
+<div class="panel" style="left:600px;top:600px;width:320px;height:225px;border-color:#b8c9ef">
+  <div class="ptitle" style="background:#2f5fd0">Document extraction</div>
+  <div style="padding:10px 14px">
+    <div style="display:flex;align-items:center;gap:3px;font-size:12px;font-weight:700;flex-wrap:nowrap">
+      <span class="chip" style="margin:0;font-size:11px;padding:3px 6px">PDF text</span>&rarr;<span class="chip" style="margin:0;font-size:11px;padding:3px 6px">Tesseract OCR</span>&rarr;<span class="chip" style="margin:0;font-size:11px;padding:3px 6px">Form 16 parser</span>
+    </div>
+    <ul style="--c:#2f5fd0;margin-top:8px">
+      <li>Cell-position table reading (Part A &amp; B)</li>
+      <li>Form 26AS / AIS parsers for TDS match</li>
+      <li>Confidence score per field</li>
+    </ul>
+  </div>
+</div>
+
+<div class="panel" style="left:940px;top:600px;width:330px;height:225px;border-color:#bfe2cc">
+  <div class="ptitle" style="background:#1f8a4c">Tax rule engine</div>
+  <div style="padding:10px 14px">
+    <ul style="--c:#1f8a4c">
+      <li>Versioned rule packs per financial year</li>
+      <li>Slabs, 87A rebate, surcharge, 4% cess</li>
+      <li>Chapter VI-A caps (80C, 80D, 80CCD&hellip;)</li>
+      <li>Exact Decimal maths, &sect;288A/B rounding</li>
+    </ul>
+  </div>
+</div>
+
+<div class="panel" style="left:1290px;top:600px;width:320px;height:225px;border-color:#d7c6f3">
+  <div class="ptitle" style="background:#7a3fd0">Verification gates</div>
+  <div style="padding:8px 12px">
+    <span class="chip">Recompute both regimes</span><span class="chip">TDS vs 26AS</span><span class="chip">AIS match</span><span class="chip">Deduction legality</span><span class="chip">Slab arithmetic</span><span class="chip">Rounding</span><span class="chip">PAN validity</span><span class="chip">ITR form fit</span><span class="chip">Source evidence</span><span class="chip">Bank details</span>
+    <div style="font-size:12.5px;color:#4a5570;margin-top:6px">Correct <b>and</b> complete &rArr; PASS</div>
+  </div>
+</div>
+
+<div class="panel" style="left:1640px;top:600px;width:250px;height:225px;border-color:#e3d6b8">
+  <div class="ptitle" style="background:#8a6a1f">Optional local AI</div>
+  <div style="padding:10px 14px">
+    <div style="display:flex;gap:8px;align-items:center"><span class="icon">&#129433;</span><b style="font-size:14.5px">Ollama (local LLM)</b></div>
+    <ul style="--c:#8a6a1f;margin-top:6px">
+      <li>Classifies failure causes</li>
+      <li>Vision hints for other docs</li>
+      <li>Never overrides tax maths</li>
+    </ul>
+  </div>
+</div>
+
+<!-- DATA LAYER -->
+<div class="panel" style="left:30px;top:855px;width:1860px;height:200px;background:#f0f4fb;border-color:#c5d1ea">
+  <div class="ptitle" style="background:#10224a">Shared state &amp; storage layer</div>
+  <div class="store" style="left:16px;width:355px;border-color:#b9c6e4;background:#fff">
+    <div class="t">&#129504; TaxWorkflowState</div>
+    <div class="d">One shared object: extracted data, both regime results, verification, repair attempts, audit trail. Checkpointed after every step.</div>
+  </div>
+  <div class="store" style="left:386px;width:355px;background:#fff">
+    <div class="t">&#128451;&#65039; SQLite / PostgreSQL</div>
+    <div class="d">Submissions, job queue, final results. Schema managed by Alembic migrations.</div>
+  </div>
+  <div class="store" style="left:756px;width:355px;background:#fff">
+    <div class="t">&#128193; Local file storage</div>
+    <div class="d">uploads/ &rarr; original documents<br>generated/ &rarr; report PDF, ITR JSON, receipts</div>
+  </div>
+  <div class="store" style="left:1126px;width:355px;background:#fff">
+    <div class="t">&#128218; ChromaDB memory</div>
+    <div class="d">Local vector memory of processed documents and case summaries &mdash; no cloud calls.</div>
+  </div>
+  <div class="store" style="left:1496px;width:348px;background:#fff">
+    <div class="t">&#128220; Audit log</div>
+    <div class="d">Timestamped entry for every agent decision, correction and retry &mdash; fully explainable.</div>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<div class="abs" style="left:30px;top:1075px;width:1860px;height:125px;display:flex;gap:18px">
+  <div class="panel" style="position:relative;flex:1.7;padding:12px 16px">
+    <div style="font-weight:800;font-size:15px;color:#10224a;letter-spacing:.5px">TECH STACK</div>
+    <div style="margin-top:6px">
+      <span class="chip">&#128013; Python 3.11</span><span class="chip">&#9889; FastAPI</span><span class="chip">&#128279; LangGraph</span><span class="chip">&#9883;&#65039; React + TypeScript + Vite</span><span class="chip">&#128065; Tesseract OCR</span><span class="chip">&#128196; PyMuPDF / ReportLab</span><span class="chip">&#128451; SQLAlchemy + Alembic</span><span class="chip">&#128218; ChromaDB</span><span class="chip">&#129433; Ollama</span><span class="chip">&#128051; Docker</span>
+    </div>
+  </div>
+  <div class="panel" style="position:relative;flex:1;padding:12px 16px">
+    <div style="font-weight:800;font-size:15px;color:#10224a;letter-spacing:.5px">LEGEND</div>
+    <svg width="560" height="60" style="margin-top:4px">
+      <defs>
+        <marker id="lb" markerUnits="userSpaceOnUse" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto"><path d="M0,0 L13,6.5 L0,13 z" fill="#2f5fd0"/></marker>
+        <marker id="lg" markerUnits="userSpaceOnUse" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto"><path d="M0,0 L13,6.5 L0,13 z" fill="#1f9d55"/></marker>
+        <marker id="lr" markerUnits="userSpaceOnUse" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto"><path d="M0,0 L13,6.5 L0,13 z" fill="#d63a3a"/></marker>
+        <marker id="lo" markerUnits="userSpaceOnUse" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto"><path d="M0,0 L13,6.5 L0,13 z" fill="#e07b12"/></marker>
+      </defs>
+      <line x1="0" y1="15" x2="50" y2="15" stroke="#2f5fd0" stroke-width="3" marker-end="url(#lb)"/><text x="60" y="20" font-size="14">Data flow</text>
+      <line x1="150" y1="15" x2="200" y2="15" stroke="#1f9d55" stroke-width="3" marker-end="url(#lg)"/><text x="210" y="20" font-size="14">Checks passed</text>
+      <line x1="330" y1="15" x2="380" y2="15" stroke="#d63a3a" stroke-width="3" marker-end="url(#lr)"/><text x="390" y="20" font-size="14">Checks failed</text>
+      <line x1="0" y1="45" x2="50" y2="45" stroke="#e07b12" stroke-width="3" stroke-dasharray="7 5" marker-end="url(#lo)"/><text x="60" y="50" font-size="14">Self-healing retry loop</text>
+      <line x1="250" y1="45" x2="300" y2="45" stroke="#9aa6bf" stroke-width="2" stroke-dasharray="3 4"/><text x="310" y="50" font-size="14">Uses service / reads state</text>
+    </svg>
+  </div>
+</div>
+
+<!-- ARROWS OVERLAY -->
+<svg class="abs" style="left:0;top:0;pointer-events:none" width="1920" height="1220">
+  <defs>
+    <marker id="b" markerUnits="userSpaceOnUse" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto"><path d="M0,0 L13,6.5 L0,13 z" fill="#2f5fd0"/></marker>
+    <marker id="g" markerUnits="userSpaceOnUse" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto"><path d="M0,0 L13,6.5 L0,13 z" fill="#1f9d55"/></marker>
+    <marker id="r" markerUnits="userSpaceOnUse" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto"><path d="M0,0 L13,6.5 L0,13 z" fill="#d63a3a"/></marker>
+    <marker id="o" markerUnits="userSpaceOnUse" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto"><path d="M0,0 L13,6.5 L0,13 z" fill="#e07b12"/></marker>
+    <marker id="gr" markerUnits="userSpaceOnUse" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto"><path d="M0,0 L13,6.5 L0,13 z" fill="#8a94a8"/></marker>
+  </defs>
+  <!-- user -> api -> pipeline -->
+  <line x1="300" y1="250" x2="326" y2="250" stroke="#2f5fd0" stroke-width="3" marker-end="url(#b)"/>
+  <line x1="570" y1="250" x2="618" y2="250" stroke="#2f5fd0" stroke-width="3" marker-end="url(#b)"/>
+  <!-- pipeline flow -->
+  <line x1="790" y1="249" x2="818" y2="249" stroke="#2f5fd0" stroke-width="3" marker-end="url(#b)"/>
+  <path d="M990,249 L1004,249 L1004,211 L1018,211" fill="none" stroke="#2f5fd0" stroke-width="3" marker-end="url(#b)"/>
+  <path d="M1004,249 L1004,287 L1018,287" fill="none" stroke="#2f5fd0" stroke-width="3" marker-end="url(#b)"/>
+  <path d="M1190,211 L1204,211 L1204,249 L1218,249" fill="none" stroke="#2f5fd0" stroke-width="3" marker-end="url(#b)"/>
+  <path d="M1190,287 L1204,287 L1204,249" fill="none" stroke="#2f5fd0" stroke-width="3"/>
+  <line x1="1390" y1="249" x2="1418" y2="249" stroke="#2f5fd0" stroke-width="3" marker-end="url(#b)"/>
+  <!-- verify -> decision -->
+  <line x1="1506" y1="308" x2="1506" y2="324" stroke="#7a3fd0" stroke-width="3"/>
+  <!-- PASS -> document -->
+  <line x1="1506" y1="370" x2="1506" y2="391" stroke="#1f9d55" stroke-width="3.5" marker-end="url(#g)"/>
+  <text x="1515" y="386" font-size="13" font-weight="800" fill="#1f9d55">PASS</text>
+  <!-- FAIL -> remediation -->
+  <path d="M1485,345 L1340,345 L1340,420 L1304,420" fill="none" stroke="#d63a3a" stroke-width="3.5" marker-end="url(#r)"/>
+  <text x="1350" y="338" font-size="13" font-weight="800" fill="#d63a3a">FAIL (attempt &lt; 2)</text>
+  <!-- FAIL after 2 -> manual review -->
+  <path d="M1527,345 L1598,345 L1598,526 L1594,526" fill="none" stroke="#8a94a8" stroke-width="2.5" marker-end="url(#gr)"/>
+  <!-- retry loops -->
+  <path d="M1000,500 L706,500 L706,312" fill="none" stroke="#e07b12" stroke-width="3" stroke-dasharray="8 6" marker-end="url(#o)"/>
+  <text x="720" y="492" font-size="13.5" font-weight="800" fill="#e07b12">&#8635; Re-extract from document</text>
+  <path d="M1000,430 L906,430 L906,312" fill="none" stroke="#e07b12" stroke-width="3" stroke-dasharray="8 6" marker-end="url(#o)"/>
+  <text x="914" y="378" font-size="13.5" font-weight="800" fill="#e07b12">&#8635; Recompute</text>
+  <!-- document -> outputs -->
+  <path d="M1590,440 L1618,440 L1618,300 L1636,300" fill="none" stroke="#1f9d55" stroke-width="3.5" marker-end="url(#g)"/>
+  <!-- services dotted -->
+  <line x1="706" y1="598" x2="706" y2="572" stroke="#9aa6bf" stroke-width="2" stroke-dasharray="3 4"/>
+  <line x1="1105" y1="598" x2="1105" y2="572" stroke="#9aa6bf" stroke-width="2" stroke-dasharray="3 4"/>
+  <line x1="1450" y1="598" x2="1450" y2="572" stroke="#9aa6bf" stroke-width="2" stroke-dasharray="3 4"/>
+  <line x1="1765" y1="598" x2="1765" y2="572" stroke="#9aa6bf" stroke-width="2" stroke-dasharray="3 4"/>
+  <!-- state layer link -->
+  <line x1="960" y1="827" x2="960" y2="853" stroke="#10224a" stroke-width="2.5" stroke-dasharray="3 4"/>
+  <line x1="300" y1="827" x2="300" y2="853" stroke="#10224a" stroke-width="2.5" stroke-dasharray="3 4"/>
+  <line x1="1450" y1="827" x2="1450" y2="853" stroke="#10224a" stroke-width="2.5" stroke-dasharray="3 4"/>
+</svg>
+</body></html>

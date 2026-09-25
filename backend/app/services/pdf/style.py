@@ -1,4 +1,7 @@
-"""Styling, Indian currency formatting, palette, fonts, and furniture for the PDF advisory report."""
+"""Styling, Indian currency formatting, palette, fonts, and furniture for the PDF advisory report.
+
+Matches the professional, high-grade TaxMind Pro / CA-Grade specification.
+"""
 
 from __future__ import annotations
 
@@ -11,25 +14,42 @@ from reportlab.lib.colors import HexColor
 from reportlab.lib.units import mm
 pt = 1
 from reportlab.pdfgen import canvas
-from reportlab.platypus import Flowable, Paragraph, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import Flowable
 
 logger = logging.getLogger(__name__)
 
-# Six-color authoritative palette
-INK = HexColor("#10151B")
-MUTED = HexColor("#5B6672")
-RULE = HexColor("#D8DEE5")
-ACCENT = HexColor("#0B3D5C")
-POSITIVE = HexColor("#0F7B4F")
-NEGATIVE = HexColor("#A8342A")
-BG_SUBHEAD = HexColor("#F6F8FA")
+# TaxMind Pro Authoritative Color Palette
+PRIMARY_NAVY = HexColor("#152C4E")    # Deep Navy Blue for primary brand & headers
+NAVY_DARK = HexColor("#0F2038")       # Darkest navy
+NAVY_REGIME = HexColor("#1E3A5F")     # Old regime header blue
+TEAL_REGIME = HexColor("#064E3B")     # New regime header green
+BG_LIGHT = HexColor("#F8FAFC")        # Clean background for alternating table rows
+BG_SUBHEAD = HexColor("#F1F5F9")      # Subheading background
+BORDER_COLOR = HexColor("#CBD5E1")    # Subtle slate border
+BORDER_LIGHT = HexColor("#E2E8F0")    # Very light border
+ACCENT_BLUE = HexColor("#2563EB")     # Accent link/badge blue
+LIGHT_BLUE = HexColor("#EFF6FF")      # Light blue box fill
+GREEN_SUCCESS = HexColor("#059669")   # Recommended regime green
+GREEN_DARK = HexColor("#065F46")      # Deep forest green text
+LIGHT_GREEN = HexColor("#ECFDF5")     # Green card background fill
+RED_ALERT = HexColor("#DC2626")       # Tax payable / alert red
+LIGHT_RED = HexColor("#FEF2F2")       # Alert card background fill
+TEXT_DARK = HexColor("#1E293B")       # Dark slate body text
+TEXT_MUTED = HexColor("#64748B")      # Muted slate secondary text
 WHITE = HexColor("#FFFFFF")
+
+# Backward-compatibility color aliases
+INK = TEXT_DARK
+MUTED = TEXT_MUTED
+RULE = BORDER_COLOR
+ACCENT = PRIMARY_NAVY
+POSITIVE = GREEN_SUCCESS
+NEGATIVE = RED_ALERT
 
 
 def inr(value: Any, decimals: int = 0) -> str:
     """Format an amount with Indian digit grouping (lakhs & crores).
-    
+
     Negative values are formatted in parentheses: (45,300), never with a minus sign.
     Examples:
         1234567 -> '12,34,567'
@@ -149,54 +169,79 @@ def register_fonts() -> tuple[str, str]:
     from reportlab.pdfbase.ttfonts import TTFont
 
     font_dir = Path(__file__).resolve().parent.parent.parent.parent / "assets" / "fonts"
-    regular_font = "Helvetica"
-    bold_font = "Helvetica-Bold"
+    win_fonts = Path("C:/Windows/Fonts")
 
-    # Attempt to load vendored fonts if present
+    # Priority 1: Segoe UI (Windows native with excellent Rupee support)
+    if (win_fonts / "segoeui.ttf").exists() and (win_fonts / "segoeuib.ttf").exists():
+        try:
+            pdfmetrics.registerFont(TTFont("SegoeUI", str(win_fonts / "segoeui.ttf")))
+            pdfmetrics.registerFont(TTFont("SegoeUI-Bold", str(win_fonts / "segoeuib.ttf")))
+            return "SegoeUI", "SegoeUI-Bold"
+        except Exception as exc:
+            logger.warning("Could not register SegoeUI font: %s", exc)
+
+    # Priority 2: Arial (Windows native with Rupee symbol)
+    if (win_fonts / "arial.ttf").exists() and (win_fonts / "arialbd.ttf").exists():
+        try:
+            pdfmetrics.registerFont(TTFont("Arial", str(win_fonts / "arial.ttf")))
+            pdfmetrics.registerFont(TTFont("Arial-Bold", str(win_fonts / "arialbd.ttf")))
+            return "Arial", "Arial-Bold"
+        except Exception as exc:
+            logger.warning("Could not register Arial font: %s", exc)
+
+    # Priority 3: SourceSans3 vendored font
     if (font_dir / "SourceSans3-Regular.ttf").exists():
         try:
             pdfmetrics.registerFont(TTFont("SourceSans3", str(font_dir / "SourceSans3-Regular.ttf")))
             pdfmetrics.registerFont(TTFont("SourceSans3-Bold", str(font_dir / "SourceSans3-Bold.ttf")))
-            pdfmetrics.registerFont(TTFont("SourceSans3-Semibold", str(font_dir / "SourceSans3-Semibold.ttf")))
-            regular_font = "SourceSans3"
-            bold_font = "SourceSans3-Bold"
+            return "SourceSans3", "SourceSans3-Bold"
         except Exception as exc:
-            logger.warning("Could not register SourceSans3 font: %s. Falling back to Helvetica.", exc)
+            logger.warning("Could not register SourceSans3 font: %s", exc)
 
-    return regular_font, bold_font
+    return "Helvetica", "Helvetica-Bold"
 
 
 class SectionHeaderFlowable(Flowable):
-    """Section header on a 16pt-tall ACCENT bar spanning full content width (174mm)."""
+    """Section header on a 22pt-tall PRIMARY_NAVY bar spanning full content width (182mm)."""
 
-    def __init__(self, number: int, title: str, width: float = 174 * mm):
+    def __init__(self, number: int, title: str, subtitle: str = "", width: float = 182 * mm):
         super().__init__()
         self.number = number
         self.title = title
+        self.subtitle = subtitle
         self.width = width
-        self.height = 18 * pt
+        self.height = 24 * pt if subtitle else 20 * pt
 
     def wrap(self, availWidth, availHeight):
         return self.width, self.height
 
     def draw(self):
         self.canv.saveState()
-        # Draw background ACCENT bar
-        self.canv.setFillColor(ACCENT)
-        self.canv.rect(0, 0, self.width, self.height, fill=1, stroke=0)
+        # Draw background Navy bar
+        self.canv.setFillColor(PRIMARY_NAVY)
+        self.canv.roundRect(0, 0, self.width, self.height, 2, fill=1, stroke=0)
 
-        # Draw white header text
+        # Draw white title text
         self.canv.setFillColor(WHITE)
         self.canv.setFont("Helvetica-Bold", 10.5)
-        text = f"{self.number}. {self.title}"
-        self.canv.drawString(6 * pt, 4.5 * pt, text)
+        text = f"{self.number}. {self.title.upper()}"
+
+        if self.subtitle:
+            self.canv.drawString(8 * pt, 12 * pt, text)
+            self.canv.setFont("Helvetica", 7.5)
+            self.canv.setFillColor(HexColor("#BFDBFE"))
+            self.canv.drawString(8 * pt, 3.5 * pt, self.subtitle)
+        else:
+            self.canv.drawString(8 * pt, 6 * pt, text)
+
         self.canv.restoreState()
 
 
 class NumberedCanvas(canvas.Canvas):
-    """Two-pass canvasmaker counting total pages for 'Page X of Y' footers."""
+    """Two-pass canvasmaker providing top running header and bottom footer on all pages."""
 
     def __init__(self, *args, **kwargs):
+        self.year_label = kwargs.pop("year_label", "")
         super().__init__(*args, **kwargs)
         self._saved_page_states = []
 
@@ -215,40 +260,62 @@ class NumberedCanvas(canvas.Canvas):
     def draw_page_furniture(self, total_pages: int):
         self.saveState()
         width, height = self._pagesize
+        margin_x = 14 * mm
 
-        # Running Header on page 2 and later
-        if self._pageNumber > 1:
-            self.setFont("Helvetica", 7.5)
-            self.setFillColor(MUTED)
-            taxpayer_str = getattr(self, "taxpayer_header", "Taxpayer Advisory Report")
-            self.drawString(18 * mm, height - 12 * mm, taxpayer_str)
-            self.drawRightString(width - 18 * mm, height - 12 * mm, "Assessment Year 2026-27 (Financial Year 2025-26)")
+        # -------------------------------------------------------------
+        # TOP RUNNING HEADER ON ALL PAGES
+        # -------------------------------------------------------------
+        top_y = height - 12 * mm
 
-            # Hairline beneath header
-            self.setStrokeColor(RULE)
-            self.setLineWidth(0.5)
-            self.line(18 * mm, height - 13.5 * mm, width - 18 * mm, height - 13.5 * mm)
+        # Logo / Brand mark (Circle icon)
+        self.setFillColor(PRIMARY_NAVY)
+        self.circle(margin_x + 5.5 * mm, top_y + 1 * mm, 5 * mm, fill=1, stroke=0)
+        self.setFillColor(WHITE)
+        self.setFont("Helvetica-Bold", 7.5)
+        self.drawCentredString(margin_x + 5.5 * mm, top_y - 1.5 * pt, "TM")
 
-        # Running Footer on all pages
+        # Brand Text
+        self.setFillColor(PRIMARY_NAVY)
+        self.setFont("Helvetica-Bold", 11)
+        self.drawString(margin_x + 12.5 * mm, top_y + 1.5 * mm, "TaxMind Pro")
+        self.setFont("Helvetica", 6.5)
+        self.setFillColor(TEXT_MUTED)
+        self.drawString(margin_x + 12.5 * mm, top_y - 2 * mm, "Deterministic Tax Advisory")
+
+        # Document Title (Right of Center)
+        self.setFillColor(PRIMARY_NAVY)
+        self.setFont("Helvetica-Bold", 9.5)
+        self.drawRightString(width - margin_x, top_y + 2 * mm, "CA-Grade Tax Regime Comparison Advisory Report")
+
+        # Subtitle & Page Number
         self.setFont("Helvetica", 7.0)
-        self.setFillColor(MUTED)
+        self.setFillColor(TEXT_MUTED)
+        self.drawRightString(width - margin_x - 22 * mm, top_y - 2 * mm, self.year_label)
 
-        # Left footer: Document ID and timestamp
-        doc_id = getattr(self, "doc_id", "DOC-ADVISORY")
-        timestamp = getattr(self, "gen_timestamp", "15 Sep 2026 12:00 IST")
-        self.drawString(18 * mm, 12 * mm, f"Document ID: {doc_id}  ·  Generated {timestamp}")
+        # Page X of Y Badge
+        self.setFont("Helvetica-Bold", 7.5)
+        self.setFillColor(PRIMARY_NAVY)
+        self.drawRightString(width - margin_x, top_y - 2 * mm, f"Page {self._pageNumber} of {total_pages}")
 
-        # Centre footer: Page X of Y
-        page_str = f"Page {self._pageNumber} of {total_pages}"
-        self.drawCentredString(width / 2.0, 12 * mm, page_str)
+        # Top divider line
+        self.setStrokeColor(BORDER_COLOR)
+        self.setLineWidth(0.6)
+        self.line(margin_x, top_y - 4.5 * mm, width - margin_x, top_y - 4.5 * mm)
 
-        # Right footer: Disclaimer
-        disclaimer = "Computer-generated advisory. Not tax advice. Verify with a CA."
-        self.drawRightString(width - 18 * mm, 12 * mm, disclaimer)
+        # -------------------------------------------------------------
+        # BOTTOM RUNNING FOOTER ON ALL PAGES
+        # -------------------------------------------------------------
+        bot_y = 10 * mm
 
-        # Hairline above footer
-        self.setStrokeColor(RULE)
-        self.setLineWidth(0.5)
-        self.line(18 * mm, 15 * mm, width - 18 * mm, 15 * mm)
+        # Bottom divider line
+        self.setStrokeColor(BORDER_COLOR)
+        self.setLineWidth(0.6)
+        self.line(margin_x, bot_y + 3.5 * mm, width - margin_x, bot_y + 3.5 * mm)
+
+        # Footer text
+        self.setFont("Helvetica", 6.5)
+        self.setFillColor(TEXT_MUTED)
+        self.drawString(margin_x, bot_y, "Technology Meets Compliance  |  Your Trusted Tax Partner")
+        self.drawRightString(width - margin_x, bot_y, "Confidential  |  For Taxpayer Use Only")
 
         self.restoreState()

@@ -39,10 +39,11 @@ class VerificationAgent:
     def __init__(
         self,
         calculator: Any | None = None,
-        threshold: float = 0.95,
+        threshold: float | None = None,
         params: TaxYearParams | None = None,
     ):
-        self.threshold = threshold
+        from app.core.config import get_settings
+        self.threshold = threshold if threshold is not None else get_settings().verification_threshold
         self.params = params
         self.income_service = IncomeComputationService()
         self.old_calculator = OldRegimeCalculator()
@@ -74,11 +75,31 @@ class VerificationAgent:
             if not passed:
                 errors.append(msg_fail)
 
+        add_check("verified_rule_pack", params.verified, "Rule pack verified", "Selected rule pack is provisional; manual review required")
+        missing_deduction_evidence = []
+        if data.deduction_claims.get("80E", 0) and data.education_loan_first_repayment_fy is None:
+            missing_deduction_evidence.append("80E first repayment financial year")
+        if data.deduction_claims.get("80G", 0) and not data.donations:
+            missing_deduction_evidence.append("80G donation eligibility/category")
+        add_check("deduction_eligibility_evidence", not missing_deduction_evidence,
+                  "Deduction eligibility inputs present", "Missing: " + ", ".join(missing_deduction_evidence))
+        # Time-dependent special-income relief and SAT payment dates are not
+        # inferred. Ordinary advance-tax estimates cannot certify these cases.
+        has_capital_gain = max(
+            comparison.old.income.capital_gains_total,
+            comparison.new.income.capital_gains_total,
+        ) > 0
+        uncertain_interest = bool(data.taxes_paid.self_assessment_tax or
+            ((has_capital_gain or data.dividend_income or data.winnings_115bb) and
+             max(comparison.old.interest_234c, comparison.new.interest_234c) > 0))
+        add_check("interest_timing_supported", not uncertain_interest,
+                  "Interest timing supported", "Manual review required for dated SAT payments or special-income advance-tax relief")
+
         # -------------------------------------------------------------------
         # 1. Recomputation Check [Weight: 3.0]
         # Anti-hallucination: re-run BOTH engines in a fresh instance from data
         # -------------------------------------------------------------------
-        f_date = filing_date or date(2026, 7, 31)
+        f_date = filing_date or data.filing_date or params.filing_due_date
         inc_old_fresh = self.income_service.compute(data, Regime.OLD, params)
         inc_new_fresh = self.income_service.compute(data, Regime.NEW, params)
 
@@ -108,8 +129,9 @@ class VerificationAgent:
         # -------------------------------------------------------------------
         tds_claimed = sum(f.tds_deducted for f in data.form16s) + data.taxes_paid.tds_non_salary
         tds_26as = data.taxes_paid.tds_salary + data.taxes_paid.tds_non_salary
+        has_26as_doc = any(e.source == "Form26AS" for e in data.evidence)
 
-        # If 26AS data is present, must match within ₹1
+        # If 26AS / taxes_paid data is present, must match within ₹1
         if data.taxes_paid.tds_salary > Decimal("0") or data.taxes_paid.tds_non_salary > Decimal("0"):
             tds_diff = abs(tds_claimed - tds_26as)
             tds_ok = tds_diff <= Decimal("1")
@@ -120,13 +142,30 @@ class VerificationAgent:
         if not tds_ok:
             requires_reextraction = True
 
+        if has_26as_doc:
+            pass_msg = f"TDS claimed (₹{tds_claimed:,.0f}) reconciled with Form 26AS credit (₹{tds_26as:,.0f})"
+        else:
+            pass_msg = f"[PROVISIONAL / FORM 16 VERIFIED] TDS claimed (₹{tds_claimed:,.0f}) verified via Form 16 Part A certificate; raw Form 26AS statement not uploaded"
+
         add_check(
             "tds_26as_reconciliation",
             tds_ok,
-            f"TDS claimed (₹{tds_claimed:,.0f}) reconciled with Form 26AS credit (₹{tds_26as:,.0f})",
+            pass_msg,
             f"TDS mismatch: Claimed ₹{tds_claimed:,.0f} vs Form 26AS ₹{tds_26as:,.0f} (variance ₹{tds_diff:,.0f})",
             weight=3.0,
         )
+
+        # Advisory check: Section 80TTA requires qualifying savings bank interest
+        tta_claimed = data.deduction_claims.get("80TTA", Decimal("0"))
+        if tta_claimed > Decimal("0"):
+            has_savings = (data.savings_interest + data.other_income) >= tta_claimed
+            add_check(
+                "80tta_savings_interest_advisory",
+                has_savings,
+                f"Section 80TTA deduction (₹{tta_claimed:,.0f}) supported by declared savings interest income",
+                f"Advisory: Section 80TTA deduction of ₹{tta_claimed:,.0f} claimed in Form 16 without matching savings bank interest under Income from Other Sources",
+                weight=0.5,
+            )
 
         # -------------------------------------------------------------------
         # 3. AIS/TIS Reconciliation [Weight: 2.0]
@@ -180,6 +219,11 @@ class VerificationAgent:
             prev_limit = upper
 
         slab_ok = abs(alt_slab_tax - rec_res.tax_on_slab_income) <= Decimal("1")
+        component_sum = sum(
+            (Decimal(str(component["tax"])) for component in rec_res.slab_components),
+            Decimal("0"),
+        )
+        slab_ok = slab_ok and component_sum == rec_res.tax_on_slab_income
         add_check(
             "slab_arithmetic_independent",
             slab_ok,
@@ -376,6 +420,9 @@ class VerificationAgent:
             for c in checks
             if c.name
             in (
+                "verified_rule_pack",
+                "deduction_eligibility_evidence",
+                "interest_timing_supported",
                 "deterministic_recomputation",
                 "tds_26as_reconciliation",
                 "ais_tis_reconciliation",

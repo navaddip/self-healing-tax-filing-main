@@ -6,11 +6,14 @@ from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 
 from app.agents.regimes.base import (
+    absorb_basic_exemption,
+    basic_exemption_limit,
     cess,
     interest_and_fees,
     rebate_87a,
     round_to_ten,
     slab_tax,
+    slab_tax_components,
     special_rate_tax,
     surcharge,
 )
@@ -39,20 +42,31 @@ class NewRegimeCalculator:
         reg_params = params.regimes[regime]
         is_resident = data.residential_status != ResidentialStatus.NON_RESIDENT
 
-        # 1. Normal income portion
-        special_gains = (
-            income.stcg_111a + income.ltcg_112a_taxable + income.ltcg_112
+        # 1. Normal income portion (special rate incomes are taxed separately)
+        special_incomes = (
+            income.stcg_111a
+            + income.ltcg_112a_taxable
+            + income.ltcg_112
+            + getattr(income, "winnings_115bb", Decimal("0"))
         )
-        normal_income = max(Decimal("0"), income.total_income - special_gains)
+        normal_income = max(Decimal("0"), income.total_income - special_incomes)
 
         # 2. Slab tax (same across all age bands in new regime)
         slabs = reg_params.slabs[data.age_band]
-        slab_tax_amount = slab_tax(normal_income, slabs)
+        components = slab_tax_components(normal_income, slabs)
+        slab_tax_amount = sum((c["tax"] for c in components), Decimal("0"))
+        assert slab_tax_amount == slab_tax(normal_income, slabs)
         trace.append(f"Tax on slab income {normal_income} = {slab_tax_amount}")
 
-        # 3. Special-rate tax
+        # 3. Special-rate tax (residents first absorb unused basic exemption)
+        basic_exemption = basic_exemption_limit(slabs)
+        special_income = (
+            absorb_basic_exemption(income, normal_income, basic_exemption)
+            if is_resident
+            else income
+        )
         special_tax_amount, special_breakdown = special_rate_tax(
-            income, params.capital_gains
+            special_income, params.capital_gains
         )
         for sec, amt in special_breakdown.items():
             if amt > Decimal("0"):
@@ -77,11 +91,11 @@ class NewRegimeCalculator:
         if relief_87a > Decimal("0"):
             trace.append(f"Section 87A Marginal Relief = {relief_87a}")
 
-        # 5. Surcharge
+        # 5. Surcharge (15% cap covers capital gains, not 115BB winnings)
         sur, sur_relief = surcharge(
             income.total_income,
             tax_after_rebate,
-            special_tax_amount,
+            special_tax_amount - special_breakdown["115BB"],
             regime,
             params,
             data.age_band,
@@ -98,22 +112,29 @@ class NewRegimeCalculator:
         total_tax_liability = round_to_ten(tax_plus_surcharge + cess_amount)
         trace.append(f"Total Tax Liability (rounded) = {total_tax_liability}")
 
-        # 8. Prepaid taxes and settlement
+        # 8. Prepaid taxes, relief u/s 89/90/91 (capped at liability) and settlement
+        relief = min(
+            data.taxes_paid.relief_89 + data.taxes_paid.relief_90_91,
+            total_tax_liability,
+        )
         taxes_paid_total = (
             data.taxes_paid.tds_salary
             + data.taxes_paid.tds_non_salary
             + data.taxes_paid.tcs
             + sum(data.taxes_paid.advance_tax_instalments.values(), Decimal("0"))
             + data.taxes_paid.self_assessment_tax
+            + relief
         )
 
         int_fees = interest_and_fees(
             total_tax_liability,
             taxes_paid_total,
             filing_date,
-            date(2026, 7, 31),
+            params.filing_due_date,
             params,
             total_income=income.total_income,
+            data=data,
+            basic_exemption=basic_exemption,
         )
 
         net_settlement = (total_tax_liability + sum(int_fees.values(), Decimal("0"))) - taxes_paid_total
@@ -128,8 +149,8 @@ class NewRegimeCalculator:
             trace.append(f"Tax Payable = {tax_payable}")
 
         effective_rate = (
-            (total_tax_liability / income.gross_total_income * Decimal("100"))
-            if income.gross_total_income > Decimal("0")
+            (total_tax_liability / income.total_income * Decimal("100"))
+            if income.total_income > Decimal("0")
             else Decimal("0")
         )
 
@@ -137,6 +158,7 @@ class NewRegimeCalculator:
             regime=regime,
             income=income,
             tax_on_slab_income=slab_tax_amount,
+            slab_components=components,
             tax_on_special_income=special_tax_amount,
             tax_before_rebate=tax_before_rebate,
             rebate_87a=reb_87a,

@@ -62,9 +62,9 @@ export interface RegimeTaxResult {
 
 export interface ComparisonDelta {
   line: string;
-  old_value: number;
-  new_value: number;
-  delta: number;
+  old_value: number | string;
+  new_value: number | string;
+  delta: number | string;
 }
 
 export interface RegimeComparison {
@@ -119,6 +119,7 @@ export interface FilingReceipt {
   payload_hash?: string;
   acknowledgement_id?: string;
   instructions?: string;
+  export_supported?: boolean;
 }
 
 export interface IndianTaxpayerData {
@@ -141,7 +142,15 @@ export interface IndianTaxpayerData {
   deduction_claims?: Record<string, number | string>;
 }
 
+export interface SensitivityPoint {
+  delta: number;
+  old_tax: number;
+  new_tax: number;
+  winner: "old" | "new";
+}
+
 export interface SubmissionResult {
+  serial_no?: number | null;
   submission_id: string;
   status: WorkflowStatus;
   original_filename: string;
@@ -151,5 +160,8 @@ export interface SubmissionResult {
   audit_trail: AuditEntry[];
   receipt?: FilingReceipt;
   report_url?: string;
+  itr_json_url?: string;
+  audit_url?: string;
   error?: string;
+  missing_filing_fields?: string[];
 }

@@ -83,6 +83,138 @@ def test_form16_new_regime_detection():
     assert form16.regime_used == Regime.NEW
 
 
+def test_form16_parser_finds_employee_pan_when_table_values_follow_labels():
+    # This mirrors the embedded text order in official Form 16 table layouts.
+    table_layout_text = """
+    PAN of the Deductor
+    TAN of the Deductor
+    PAN of the Employee/specified senior citizen
+    AAECN8457P
+    DELA45678F
+    LMQPN8452H
+    """
+    parser = Form16Parser()
+    _, evidence = parser.parse(table_layout_text)
+
+    assert parser.extract_employee_pan(table_layout_text) == "LMQPN8452H"
+    assert any(item.field == "employee_pan" for item in evidence)
+
+
+def test_form16_parser_reads_official_table_cells_from_pdf_words():
+    page_words = [[] for _ in range(4)]
+    page_words[0] = [
+        (150, 214, 250, 224, "F16/BPA/2526/002816"),
+        (95, 253, 220, 263, "BluePeak"),
+        (223, 253, 270, 263, "Analytics"),
+        (282, 253, 320, 263, "Rohit"),
+        (323, 253, 365, 263, "Menon"),
+        (360, 568, 390, 576, "0"),
+        (402, 379, 445, 388, "01/04/2025"),
+        (470, 379, 515, 388, "31/03/2026"),
+    ]
+    page_words[1] = [(451, 516, 475, 525, "9,00,000")]
+    page_words[2] = [
+        (399, 217, 430, 225, "75,000"),
+        (510, 280, 546, 289, "8,25,000"),
+    ]
+
+    parser = Form16Parser()
+    form16, _ = parser.parse("FORM NO. 16 PART B", page_words=page_words)
+
+    assert form16.employer_name == "BluePeak Analytics"
+    assert parser.extract_employee_name(page_words) == "Rohit Menon"
+    assert form16.certificate_number == "F16/BPA/2526/002816"
+    assert form16.period_from == date(2025, 4, 1)
+    assert form16.period_to == date(2026, 3, 31)
+    assert form16.gross_salary_17_1 == Decimal("900000")
+    assert form16.standard_deduction == Decimal("75000")
+    assert form16.taxable_salary_per_employer == Decimal("825000")
+
+
+def test_reading_agent_includes_form16_row_7b_other_income(tmp_path):
+    from app.services.documents.service import DocumentPage
+
+    page_words = [[] for _ in range(4)]
+    page_words[1] = [(451, 516, 475, 525, "16,20,000")]
+    page_words[2] = [(507, 327, 543, 338, "35,000.00")]
+    page_words[3] = [
+        (338, 111, 374, 122, "14,000.00"),
+        (507, 111, 543, 122, "10,000.00"),
+        (498, 439, 543, 451, "1,42,740.00"),  # row 17 tax payable (must not be read as relief)
+        (512, 467, 543, 478, "12,000.00"),    # row 18 relief u/s 89
+    ]
+
+    class FakeDocuments:
+        def load(self, path, scale=2):
+            return [
+                DocumentPage(number=i + 1, image=None, embedded_text="FORM NO. 16", embedded_words=words)
+                for i, words in enumerate(page_words)
+            ]
+
+    data, _, _ = ReadingAgent(documents=FakeDocuments()).run(tmp_path / "form16.pdf")
+
+    form16 = data.form16s[0]
+    assert form16.reported_other_income == Decimal("35000")
+    assert form16.reported_savings_interest == Decimal("14000")
+    assert data.deduction_claims["80TTA"] == Decimal("10000")
+    assert data.savings_interest == Decimal("14000")
+    assert data.other_income == Decimal("21000")
+    assert form16.relief_89 == Decimal("12000")
+    assert data.taxes_paid.relief_89 == Decimal("12000")
+
+
+def _multi_document_agent(pages_by_file):
+    from app.services.documents.service import DocumentPage
+
+    class FakeDocuments:
+        def load(self, path, scale=2):
+            pan, certificate, salary = pages_by_file[path.name]
+            page_words = [[] for _ in range(4)]
+            page_words[0] = [(150, 214, 250, 224, certificate)]
+            page_words[1] = [(451, 516, 475, 525, salary)]
+            text = f"FORM NO. 16\nPAN of the Employee {pan}"
+            return [
+                DocumentPage(number=i + 1, image=None, embedded_text=text, embedded_words=words)
+                for i, words in enumerate(page_words)
+            ]
+
+    return ReadingAgent(documents=FakeDocuments())
+
+
+def test_run_many_skips_duplicate_form16_uploads(tmp_path):
+    first = tmp_path / "a.pdf"
+    same_bytes = tmp_path / "b.pdf"
+    rescanned = tmp_path / "c.pdf"
+    first.write_bytes(b"%PDF-one")
+    same_bytes.write_bytes(b"%PDF-one")
+    rescanned.write_bytes(b"%PDF-rescan")
+    agent = _multi_document_agent({
+        "a.pdf": ("ABCPD1234F", "CERT/001", "9,00,000"),
+        "b.pdf": ("ABCPD1234F", "CERT/001", "9,00,000"),
+        "c.pdf": ("ABCPD1234F", "CERT/001", "9,00,000"),
+    })
+
+    data, _, logs = agent.run_many([first, same_bytes, rescanned])
+
+    assert len(data.form16s) == 1
+    assert sum(f.gross_salary_17_1 for f in data.form16s) == Decimal("900000")
+    assert [log.action for log in logs].count("skip_duplicate_document") == 2
+
+
+def test_run_many_rejects_documents_for_different_taxpayers(tmp_path):
+    first = tmp_path / "a.pdf"
+    second = tmp_path / "b.pdf"
+    first.write_bytes(b"%PDF-a")
+    second.write_bytes(b"%PDF-b")
+    agent = _multi_document_agent({
+        "a.pdf": ("ABCPD1234F", "CERT/001", "9,00,000"),
+        "b.pdf": ("XYZPQ9876K", "CERT/002", "7,00,000"),
+    })
+
+    with pytest.raises(ValueError, match="different taxpayers"):
+        agent.run_many([first, second])
+
+
 def test_form26as_parser():
     sample_text = """
     FORM 26AS - Annual Tax Statement u/s 206CA
@@ -148,6 +280,11 @@ INFY,INE009A01021,01-01-2026,80000,10-02-2026,75000,100,Long Term
     assert items[0].transfer_expenses == Decimal("200")
     assert items[0].stt_paid is True
     assert items[0].is_pre_23jul2024 is True
+    assert items[0].is_long_term is True
+    assert items[0].holding_days == 1132
+    assert items[1].is_long_term is False
+    # Date-based classification wins over the broker's "Long Term" label.
+    assert items[2].is_long_term is False
 
     # TCS: 01-01-2026 to 15-02-2026 is short term
     assert items[1].cost_of_acquisition == Decimal("50000")

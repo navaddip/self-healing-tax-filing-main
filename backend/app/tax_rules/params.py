@@ -107,6 +107,11 @@ class TaxYearParams:
     verified: bool
     section_map: dict[str, str] = field(default_factory=dict)
 
+    @property
+    def filing_due_date(self) -> date:
+        """Standard non-audit due date; notified extensions require a pack update."""
+        return date(int(self.assessment_year[:4]), 7, 31)
+
 
 _REGISTRY: dict[str | int, TaxYearParams] = {}
 
@@ -114,6 +119,10 @@ _REGISTRY: dict[str | int, TaxYearParams] = {}
 def register(params: TaxYearParams) -> TaxYearParams:
     _REGISTRY[params.year] = params
     _REGISTRY[params.financial_year] = params
+    # Prefix assessment-year keys because e.g. "2026-27" is both AY 2026-27
+    # and the following pack's FY 2026-27.
+    _REGISTRY[f"AY_{params.assessment_year.replace('-', '_')}"] = params
+    _REGISTRY[f"FY_{params.financial_year.replace('-', '_')}"] = params
     return params
 
 

@@ -8,10 +8,11 @@ plain-English reasons, and a sensitivity table for what-if scenarios.
 
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from typing import Any
 
 from app.agents.regimes.base import (
+    calculate_taxable_income_liability,
     cess,
     rebate_87a,
     round_to_ten,
@@ -94,6 +95,9 @@ class RegimeComparisonAgent:
 
         # Current total old deductions and exemptions
         current_old_claims = self._compute_total_old_claims(data, old)
+        total_old_reductions = max(
+            Decimal("0"), self._compute_raw_gross_income(data) - old.income.total_income
+        )
 
         # 8. Reasons
         reasons = self._generate_reasons(
@@ -116,6 +120,7 @@ class RegimeComparisonAgent:
             savings_pct=savings_pct,
             deltas=deltas,
             deductions_forfeited_if_new=deductions_forfeited,
+            current_old_total_reductions=total_old_reductions,
             breakeven_deduction_amount=breakeven,
             unused_80c_headroom=unused_80c,
             switch_allowed_annually=switch_allowed,
@@ -149,9 +154,8 @@ class RegimeComparisonAgent:
         total += old.income.exempt_allowances
         # Professional tax
         total += old.income.professional_tax
-        # Self-occupied HP interest
-        if any(hp.is_self_occupied for hp in data.house_properties):
-            total += old.income.hp_loss_set_off
+        # Self-occupied HP interest (engine already handles Form 16 fallback)
+        total += old.income.hp_loss_set_off
         # Chapter VI-A
         total += old.income.chapter_via_total
         return total
@@ -341,12 +345,11 @@ class RegimeComparisonAgent:
                 old.income.professional_tax
             )
 
-        # Self-occupied property loan interest
-        if any(hp.is_self_occupied for hp in data.house_properties):
-            if old.income.hp_loss_set_off > Decimal("0"):
-                forfeited["Home Loan Interest SOP u/s 24(b)"] = (
-                    old.income.hp_loss_set_off
-                )
+        # Self-occupied property loan interest (engine already handles Form 16 fallback)
+        if old.income.hp_loss_set_off > Decimal("0"):
+            forfeited["Home Loan Interest SOP u/s 24(b)"] = (
+                old.income.hp_loss_set_off
+            )
 
         # Chapter VI-A sections disallowed in New
         for sec, amt in old.income.chapter_via.items():
@@ -360,9 +363,13 @@ class RegimeComparisonAgent:
         """Compute taxpayer's total raw income before any deductions or exemptions."""
         # Gross salary before deductions and exemptions
         salary = sum(
-            f.gross_salary_17_1 + f.perquisites_17_2 + f.profits_in_lieu_17_3
-            for f in data.form16s
+            (f.gross_salary_17_1 + f.perquisites_17_2 + f.profits_in_lieu_17_3
+             for f in data.form16s),
+            Decimal("0"),
         )
+        if salary == Decimal("0") and data.salary_breakup:
+            sb = data.salary_breakup
+            salary = sb.basic + sb.dearness_allowance + sb.hra_received + sb.lta_received + sb.other_allowances
         # Let-out house property rent
         hp_let_out = Decimal("0")
         for hp in data.house_properties:
@@ -411,38 +418,39 @@ class RegimeComparisonAgent:
         new: RegimeTaxResult,
         params: TaxYearParams,
     ) -> Decimal:
-        """Bisect to find the exact deduction amount D where Old tax equals New tax."""
-        raw_gross = self._compute_raw_gross_income(data)
+        """Find total old-regime reductions from raw income needed to match New tax.
+
+        A reduction includes exemptions, salary deductions, house-property loss
+        set-off and Chapter VI-A.  The solver probes taxable income directly so
+        it never invents or proportionally scales capped statutory claims.
+        """
         target_tax = new.total_tax_liability
-        is_resident = (
-            data.residential_status != ResidentialStatus.NON_RESIDENT
-        )
-        age_band = data.age_band
-        special_tax = old.tax_on_special_income
+        base_income = self._compute_raw_gross_income(data)
+        is_resident = data.residential_status != ResidentialStatus.NON_RESIDENT
 
-        def tax_at_deduction(d: Decimal) -> Decimal:
-            taxable = max(Decimal("0"), raw_gross - d)
-            normal_income = max(Decimal("0"), taxable - (old.income.stcg_111a + old.income.ltcg_112a_taxable + old.income.ltcg_112))
-            st = slab_tax(normal_income, params.regimes[Regime.OLD].slabs[age_band])
-            reb, _ = rebate_87a(taxable, st, special_tax, Regime.OLD, params, is_resident)
-            tax_after_reb = (st + special_tax) - reb
-            sur, _ = surcharge(taxable, tax_after_reb, special_tax, Regime.OLD, params)
-            tax_plus_sur = tax_after_reb + sur
-            c = cess(tax_plus_sur, params.cess_rate)
-            # Use unrounded tax + cess for exact bisection crossover
-            return tax_plus_sur + c
+        def old_exact_tax(reduction: Decimal) -> Decimal:
+            probe = calculate_taxable_income_liability(
+                base_income - reduction,
+                Regime.OLD,
+                params,
+                data.age_band,
+                is_resident,
+                round_taxable_income=False,
+            )
+            return probe["total_tax_exact"]
 
-        # If even at 0 deductions, old tax is <= target tax, breakeven is 0
-        if tax_at_deduction(Decimal("0")) <= target_tax:
+        max_ded = base_income
+
+        # If 0 deductions already yields <= target, breakeven is 0
+        if old_exact_tax(Decimal("0")) <= target_tax:
             return Decimal("0")
 
-        # If at max deductions (gross income), old tax > target tax (target tax is 0 and old tax > 0)
-        # return raw_gross
-        if tax_at_deduction(raw_gross) > target_tax:
-            return raw_gross
+        # If max deductions still yields > target, return max
+        if old_exact_tax(max_ded) > target_tax:
+            return max_ded
 
         low = Decimal("0")
-        high = raw_gross
+        high = max_ded
         one = Decimal("1")
 
         # Integer bisection to the rupee
@@ -450,18 +458,17 @@ class RegimeComparisonAgent:
             mid = ((low + high) / Decimal("2")).quantize(
                 Decimal("1"), rounding=ROUND_HALF_UP
             )
-            val = tax_at_deduction(mid)
+            val = old_exact_tax(mid)
             if val <= target_tax:
-                # Old tax is <= target, so deduction is sufficient; try smaller deduction
                 high = mid
             else:
-                # Old tax is still higher than target; need more deduction
                 low = mid
 
-        # Check between low and high
-        if tax_at_deduction(low) <= target_tax:
-            return low
-        return high
+        result = high.quantize(Decimal("1"), rounding=ROUND_CEILING)
+        assert old_exact_tax(result) <= target_tax
+        if result > 0:
+            assert old_exact_tax(result - Decimal("1")) > target_tax
+        return result
 
     def _generate_reasons(
         self,
@@ -502,7 +509,8 @@ class RegimeComparisonAgent:
                 )
                 reasons.append(
                     f"Your HRA exemption of ₹{hra_amt:,.0f} and Section 24(b) interest of ₹{sop_amt:,.0f} "
-                    f"are worth ₹{tax_val:,.0f} in tax under the old regime and nothing under the new regime."
+                    f"have an illustrative tax value of ₹{tax_val:,.0f} at a 31.2% marginal-rate assumption; "
+                    "this is not the taxpayer's actual scenario saving."
                 )
 
             reasons.append(
@@ -544,7 +552,11 @@ class RegimeComparisonAgent:
         params: TaxYearParams,
         deduction_deltas: list[Decimal] | None = None,
     ) -> list[dict[str, Any]]:
-        """Re-run old-regime at GTI-constant for various deduction deltas."""
+        """Re-run Old Regime through the full engine pipeline for various deduction deltas.
+
+        Uses IncomeComputationService + OldRegimeCalculator for each scenario
+        to guarantee consistency with the actual tax engine.
+        """
         if deduction_deltas is None:
             deduction_deltas = [
                 Decimal("-50000"),
@@ -556,7 +568,6 @@ class RegimeComparisonAgent:
                 Decimal("150000"),
             ]
 
-        # Calculate base old and new
         from app.agents.income.computation import IncomeComputationService
         from app.agents.regimes.new_regime import NewRegimeCalculator
         from app.agents.regimes.old_regime import OldRegimeCalculator
@@ -564,51 +575,38 @@ class RegimeComparisonAgent:
         income_svc = IncomeComputationService()
         old_calc = OldRegimeCalculator()
         new_calc = NewRegimeCalculator()
-
-        inc_old = income_svc.compute(data, Regime.OLD, params)
-        inc_new = income_svc.compute(data, Regime.NEW, params)
-
         from datetime import date
-        dummy_date = date(2026, 7, 31)
+        f_date = data.filing_date or params.filing_due_date
 
-        res_new = new_calc.calculate(data, inc_new, params, dummy_date)
+        # Compute baseline new regime tax (constant across all scenarios)
+        inc_new = income_svc.compute(data, Regime.NEW, params)
+        res_new = new_calc.calculate(data, inc_new, params, f_date)
         new_tax = res_new.total_tax_liability
 
-        results: list[dict[str, Any]] = []
-        raw_gross = self._compute_raw_gross_income(data)
-        current_claims = self._compute_total_old_claims(data, old_calc.calculate(data, inc_old, params, dummy_date))
+        inc_old_base = income_svc.compute(data, Regime.OLD, params)
+        raw_income = self._compute_raw_gross_income(data)
+        base_total = max(Decimal("0"), raw_income - inc_old_base.total_income)
+        is_resident = data.residential_status != ResidentialStatus.NON_RESIDENT
 
-        is_resident = (
-            data.residential_status != ResidentialStatus.NON_RESIDENT
-        )
-        age_band = data.age_band
-        special_tax = inc_old.stcg_111a * Decimal("0.20") + inc_old.ltcg_112a_taxable * Decimal("0.125") + inc_old.ltcg_112 * Decimal("0.125")
+        results: list[dict[str, Any]] = []
 
         for delta in deduction_deltas:
-            adjusted_claims = max(Decimal("0"), current_claims + delta)
-            taxable = max(Decimal("0"), raw_gross - adjusted_claims)
-            taxable_rounded = round_to_ten(taxable)
-            normal_income = max(
-                Decimal("0"),
-                taxable_rounded
-                - (inc_old.stcg_111a + inc_old.ltcg_112a_taxable + inc_old.ltcg_112),
+            target_total = max(Decimal("0"), base_total + delta)
+            probe = calculate_taxable_income_liability(
+                raw_income - target_total,
+                Regime.OLD,
+                params,
+                data.age_band,
+                is_resident,
             )
-
-            st = slab_tax(normal_income, params.regimes[Regime.OLD].slabs[age_band])
-            reb, mr_87a = rebate_87a(
-                taxable_rounded, st, special_tax, Regime.OLD, params, is_resident
-            )
-            tax_after_reb = (st + special_tax) - reb - mr_87a
-            sur, sur_mr = surcharge(
-                taxable_rounded, tax_after_reb, special_tax, Regime.OLD, params
-            )
-            c = cess(tax_after_reb + sur, params.cess_rate)
-            old_tax = round_to_ten(tax_after_reb + sur + c)
+            old_tax = probe["total_tax_liability"]
 
             winner = Regime.OLD if old_tax < new_tax else Regime.NEW
             results.append(
                 {
                     "delta": delta,
+                    "total_reductions": target_total,
+                    "taxable_income": probe["taxable_income"],
                     "old_tax": old_tax,
                     "new_tax": new_tax,
                     "winner": winner.value,

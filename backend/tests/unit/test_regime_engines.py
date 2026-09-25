@@ -213,11 +213,12 @@ def test_golden_case_5_senior_citizen_pensioner(
         deduction_claims={"80D": Decimal("50000"), "80TTB": Decimal("50000")},
     )
     inc_old = income_service.compute(data, Regime.OLD, params)
-    assert inc_old.total_income == Decimal("750000")
+    assert inc_old.total_income == Decimal("800000")
+    assert inc_old.chapter_via["80TTB"] == 0  # no qualifying interest declared
     res_old = old_calc.calculate(data, inc_old, params)
-    assert res_old.tax_on_slab_income == Decimal("60000")
+    assert res_old.tax_on_slab_income == Decimal("70000")
     assert res_old.rebate_87a == Decimal("0")
-    assert res_old.total_tax_liability == Decimal("62400")
+    assert res_old.total_tax_liability == Decimal("72800")
 
     inc_new = income_service.compute(data, Regime.NEW, params)
     assert inc_new.total_income == Decimal("825000")
@@ -251,3 +252,90 @@ def test_golden_case_6_surcharge_marginal_relief(
     res = new_calc.calculate(data, inc, params)
     assert res.surcharge == expected_surcharge
     assert res.total_tax_liability == expected_total_tax
+
+
+def test_winnings_115bb_flat_tax(income_service, old_calc, new_calc, params):
+    """Section 115BB: Winnings are taxed at flat 30% without basic exemption limit."""
+    data = IndianTaxpayerData(winnings_115bb=Decimal("200000"))
+
+    inc_new = income_service.compute(data, Regime.NEW, params)
+    res_new = new_calc.calculate(data, inc_new, params)
+    assert res_new.tax_on_slab_income == Decimal("0")
+    assert res_new.tax_on_special_income == Decimal("60000")
+    assert res_new.cess == Decimal("2400")
+    assert res_new.total_tax_liability == Decimal("62400")
+
+    inc_old = income_service.compute(data, Regime.OLD, params)
+    res_old = old_calc.calculate(data, inc_old, params)
+    assert res_old.tax_on_slab_income == Decimal("0")
+    assert res_old.tax_on_special_income == Decimal("60000")
+    assert res_old.cess == Decimal("2400")
+    assert res_old.total_tax_liability == Decimal("62400")
+
+
+def test_old_regime_rebate_87a_on_stcg_111a(income_service, old_calc, params):
+    """Old Regime: Rebate 87A applies against STCG 111A up to ₹12,500 when total income <= ₹5L."""
+    cg = CapitalGainItem(
+        asset_type="listed_equity",
+        acquisition_date=date(2025, 1, 1),
+        transfer_date=date(2025, 4, 1),
+        sale_consideration=Decimal("200000"),
+        cost_of_acquisition=Decimal("100000"),
+        stt_paid=True,
+    )
+    # Gross salary 3,50,000 - 50,000 std ded = 3,00,000 salary
+    # STCG 111A = 1,00,000. Total income = 4,00,000 (<= 5,00,000).
+    f16 = Form16(gross_salary_17_1=Decimal("350000"))
+    data = IndianTaxpayerData(form16s=[f16], capital_gains=[cg])
+
+    inc_old = income_service.compute(data, Regime.OLD, params)
+    res_old = old_calc.calculate(data, inc_old, params)
+    # Slab tax on ₹3,00,000: 5% on 50,000 = ₹2,500
+    assert res_old.tax_on_slab_income == Decimal("2500")
+    # Special tax on STCG 111A ₹1,00,000 @ 20% = ₹20,000
+    assert res_old.tax_on_special_income == Decimal("20000")
+    assert res_old.tax_before_rebate == Decimal("22500")
+    # Rebate 87A capped at ₹12,500
+    assert res_old.rebate_87a == Decimal("12500")
+    assert res_old.tax_after_rebate == Decimal("10000")
+    assert res_old.cess == Decimal("400")
+    assert res_old.total_tax_liability == Decimal("10400")
+
+
+def test_non_resident_senior_citizen_old_regime_slabs(income_service, old_calc, params):
+    """Non-residents do not qualify for senior citizen exemption limits (₹3L/₹5L)."""
+    # Gross salary 5,50,000 - 50,000 std ded = 5,00,000 total income
+    f16 = Form16(gross_salary_17_1=Decimal("550000"))
+    data = IndianTaxpayerData(
+        age_band=AgeBand.SENIOR_60_80,
+        residential_status=ResidentialStatus.NON_RESIDENT,
+        form16s=[f16],
+    )
+    inc = income_service.compute(data, Regime.OLD, params)
+    res = old_calc.calculate(data, inc, params)
+    # Exemption is ₹2,50,000 (not ₹3,00,000). Tax = 5% of ₹2,50,000 = ₹12,500.
+    assert res.tax_on_slab_income == Decimal("12500")
+    # Non-residents are not entitled to Section 87A rebate
+    assert res.rebate_87a == Decimal("0")
+    assert res.cess == Decimal("500")
+    assert res.total_tax_liability == Decimal("13000")
+
+
+def test_rule_119a_rounding_for_section_234a(old_calc, params):
+    """Rule 119A: Fraction of 100 is ignored when computing interest under Section 234A."""
+    from app.agents.regimes.base import interest_and_fees
+
+    # Unpaid tax ₹12,385 -> base under Rule 119A is ₹12,300
+    out = interest_and_fees(
+        total_tax_liability=Decimal("12385"),
+        taxes_paid_total=Decimal("0"),
+        filing_date=date(2026, 9, 15),
+        due_date=date(2026, 7, 31),
+        params=params,
+        is_belated=True,
+        total_income=Decimal("500000"),
+    )
+    # Months late: Aug + Sep = 2 months. Rate: 1% per month.
+    # Base: 12,300 * 1% * 2 = 246
+    assert out["interest_234a"] == Decimal("246")
+

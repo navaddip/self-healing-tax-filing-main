@@ -12,6 +12,7 @@ from typing import Any
 
 from app.schemas.tax import IndianTaxpayerData, Regime, RegimeTaxResult, ResidentialStatus
 from app.tax_rules.params import TaxParams
+from app.itr.requirements import require_filing_data
 
 
 class ITR2Builder:
@@ -25,6 +26,7 @@ class ITR2Builder:
         submission_id: str = "SUB-2026-002",
     ) -> dict[str, Any]:
         """Build the complete ITR-2 dictionary."""
+        require_filing_data(data, tax_result, params)
         today_str = date.today().isoformat()
         name_parts = (data.name or "Taxpayer").split()
         first_name = name_parts[0] if name_parts else "Taxpayer"
@@ -38,8 +40,8 @@ class ITR2Builder:
 
         schedule_tds1 = [
             {
-                "EmployerOrDeductorName": f16.employer_name or "Employer",
-                "TAN": f16.employer_tan or "BLRT00000A",
+                "EmployerOrDeductorName": f16.employer_name,
+                "TAN": f16.employer_tan,
                 "TotalGrossAmount": int(f16.gross_salary_17_1),
                 "TotalTDSDeducted": int(f16.tds_deducted),
             }
@@ -47,44 +49,7 @@ class ITR2Builder:
         ]
 
         schedule_tds2 = []
-        for t2 in getattr(data, "form26as_entries", []):
-            if getattr(t2, "section", "") != "192":
-                schedule_tds2.append({
-                    "DeductorName": getattr(t2, "deductor_name", "Deductor") or "Deductor",
-                    "TAN": getattr(t2, "deductor_tan", "BLRD00000A"),
-                    "TotalGrossAmount": int(getattr(t2, "amount_paid", 0)),
-                    "TotalTDSDeducted": int(getattr(t2, "tax_deducted", 0)),
-                })
-        if not schedule_tds2 and data.taxes_paid.tds_non_salary > Decimal("0"):
-            schedule_tds2.append({
-                "DeductorName": "Bank / Other Deductor",
-                "TAN": "BLRD00000A",
-                "TotalGrossAmount": int(data.savings_interest + data.fd_interest),
-                "TotalTDSDeducted": int(data.taxes_paid.tds_non_salary),
-            })
-
         schedule_it = []
-        for ch in getattr(data.taxes_paid, "advance_tax_challans", []) + getattr(data.taxes_paid, "self_assessment_challans", []):
-            schedule_it.append({
-                "BSRCode": getattr(ch, "bsr_code", "0000000") or "0000000",
-                "DateOfDeposit": ch.deposit_date.isoformat() if getattr(ch, "deposit_date", None) else today_str,
-                "ChallanNo": getattr(ch, "challan_serial_no", "00000") or "00000",
-                "TaxPaid": int(getattr(ch, "amount", 0)),
-            })
-        for inst_name, amt in data.taxes_paid.advance_tax_instalments.items():
-            schedule_it.append({
-                "BSRCode": "0000000",
-                "DateOfDeposit": today_str,
-                "ChallanNo": "00000",
-                "TaxPaid": int(amt),
-            })
-        if data.taxes_paid.self_assessment_tax > Decimal("0") and not getattr(data.taxes_paid, "self_assessment_challans", []):
-            schedule_it.append({
-                "BSRCode": "0000000",
-                "DateOfDeposit": today_str,
-                "ChallanNo": "00001",
-                "TaxPaid": int(data.taxes_paid.self_assessment_tax),
-            })
 
         advance_tax = int(sum((getattr(c, "amount", 0) for c in getattr(data.taxes_paid, "advance_tax_challans", [])), Decimal("0")))
         if not advance_tax:
@@ -138,13 +103,13 @@ class ITR2Builder:
                         "SWCreatedBy": "SelfHealingTaxIndia",
                         "JSONCreatedBy": "SelfHealingTaxIndia",
                         "JSONCreationDate": today_str,
-                        "IntermediaryCity": "Bengaluru",
+                        "IntermediaryCity": data.city,
                         "SubmissionId": submission_id,
                     },
                     "Form_ITR2": {
                         "FormName": "ITR-2",
                         "Description": "For Individuals and HUFs not having income from profits and gains of business or profession",
-                        "AssessmentYear": "2026",
+                        "AssessmentYear": params.assessment_year[:4],
                         "SchemaVer": "Ver1.0",
                         "FormVer": "Ver1.0",
                     },
@@ -152,22 +117,21 @@ class ITR2Builder:
                         "PersonalInfo": {
                             "AssesseeName": {"FirstName": first_name, "SurNameOrOrgName": sur_name},
                             "PAN": data.pan,
-                            "DOB": data.date_of_birth.isoformat() if data.date_of_birth else "1990-01-01",
-                            "AadhaarCardNo": data.aadhaar_last4.rjust(12, "9") if data.aadhaar_last4 else "999999999999",
-                            "MobileNo": "9876543210",
-                            "EmailAddress": "taxpayer@example.com",
+                            "DOB": data.date_of_birth.isoformat(),
+                            "MobileNo": data.mobile,
+                            "EmailAddress": data.email,
                             "Address": {
-                                "ResidenceNo": "Flat 101",
-                                "CityOrTownOrDistrict": "Bengaluru",
-                                "StateCode": "29",
-                                "PinCode": "560001",
+                                "ResidenceNo": data.address,
+                                "CityOrTownOrDistrict": data.city,
+                                "StateCode": data.state_code,
+                                "PinCode": data.pin_code,
                                 "CountryCode": "91",
                             },
                         },
                         "FilingStatus": {
                             "ReturnFileSec": 11,
                             "OptOutNewTaxRegime": opt_out,
-                            "ItrFilingDueDate": "2026-07-31",
+                            "ItrFilingDueDate": params.filing_due_date.isoformat(),
                             "ResidentialStatus": res_code,
                         },
                     },
@@ -231,24 +195,22 @@ class ITR2Builder:
                     "BankAccountDtls": {
                         "AddtnlBankDetails": [
                             {
-                                "IFSCCode": data.bank_ifsc or "HDFC0001234",
-                                "BankName": "Primary Bank",
-                                "BankAccountNo": f"XXXXXX{data.bank_account_last4}" if data.bank_account_last4 else "1234567890",
-                                "AccountType": "SAVINGS",
-                                "PreferredForRefund": "Y",
+                                "IFSCCode": data.bank_ifsc,
+                                "BankName": data.bank_name,
+                                "BankAccountNo": data.bank_account_number,
+                                "AccountType": data.bank_account_type or "SB",
+                                "UseForRefund": "true",
                             }
                         ]
                     },
                     "Verification": {
                         "Declaration": {
                             "AssesseeVerName": data.name or "Taxpayer",
-                            "FatherName": f"Father of {data.name or 'Taxpayer'}",
-                            "AssesseePAN": data.pan,
-                            "Capacity": "Self",
-                            "Place": "Bengaluru",
-                            "Date": today_str,
-                            "IPAddress": "127.0.0.1",
-                        }
+                            "FatherName": data.father_name,
+                            "AssesseeVerPAN": data.pan,
+                        },
+                        "Capacity": data.verification_capacity or "S",
+                        "Place": data.verification_place,
                     },
                 }
             }
