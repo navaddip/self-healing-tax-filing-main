@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from enum import StrEnum
+from enum import Enum
 
 
-class AgeBand(StrEnum):
+class AgeBand(str, Enum):
     BELOW_60 = "below_60"
     SENIOR_60_80 = "senior_60_80"
     SENIOR_60_TO_79 = "senior_60_80"

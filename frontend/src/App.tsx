@@ -31,6 +31,15 @@ export default function App() {
   const [dragging, setDragging] = useState(false);
 
   useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      document.documentElement.style.setProperty('--mouse-x', `${e.clientX}px`);
+      document.documentElement.style.setProperty('--mouse-y', `${e.clientY}px`);
+    };
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
+  }, []);
+
+  useEffect(() => {
     const submissionId = new URLSearchParams(window.location.search).get(
       "submission",
     );
@@ -107,11 +116,6 @@ export default function App() {
       <header className="hero">
         <div className="eyebrow">Self-Healing Indian Income Tax Advisory</div>
         <h1>Indian Tax Documents In.<br />Optimal Regime & ITR Out.</h1>
-        <p>
-          Eight specialized agents extract Form 16, 26AS, and AIS, compute 5 statutory income heads,
-          run dual tax engines (Old vs New Sec 115BAC) in parallel, heal discrepancies, and generate
-          an 8-page CA advisory report with official ITR JSON.
-        </p>
       </header>
 
       <AgentPipeline status={busy ? "computing_income" : result?.status} result={result} />
@@ -173,20 +177,7 @@ export default function App() {
           )}
         </form>
 
-        <aside className="principles">
-          <div>
-            <span>01</span>
-            <p><strong>Grounded extraction</strong>Every value carries source evidence.</p>
-          </div>
-          <div>
-            <span>02</span>
-            <p><strong>Rule-based math</strong>LLMs never author tax arithmetic.</p>
-          </div>
-          <div>
-            <span>03</span>
-            <p><strong>Bounded recovery</strong>Failed checks trigger an auditable loop.</p>
-          </div>
-        </aside>
+
       </section>
 
       {result && <ResultPanel result={result} onResubmit={followRerun} />}

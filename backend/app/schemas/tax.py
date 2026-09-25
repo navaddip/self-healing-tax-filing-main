@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from enum import StrEnum
+from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -11,18 +11,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.schemas.validators import AgeBand, mask_pan, validate_ifsc
 
 
-class Regime(StrEnum):
+class Regime(str, Enum):
     OLD = "old"
     NEW = "new"
 
 
-class ResidentialStatus(StrEnum):
+class ResidentialStatus(str, Enum):
     RESIDENT_ORDINARY = "resident_ordinary"
     RESIDENT_NOT_ORDINARY = "resident_not_ordinary"
     NON_RESIDENT = "non_resident"
 
 
-class ITRForm(StrEnum):
+class ITRForm(str, Enum):
     ITR1 = "ITR-1"
     ITR2 = "ITR-2"
     ITR3 = "ITR-3"
@@ -32,7 +32,7 @@ class ITRForm(StrEnum):
 ItrForm = ITRForm
 
 
-class WorkflowStatus(StrEnum):
+class WorkflowStatus(str, Enum):
     UPLOADED = "uploaded"
     PARSING = "parsing"
     COMPUTING_INCOME = "computing_income"
@@ -603,7 +603,7 @@ TaxCalculation = RegimeTaxResult
 W2 = Form16
 
 
-class FilingStatus(StrEnum):
+class FilingStatus(str, Enum):
     INDIVIDUAL = "individual"
     SINGLE = "single"
     MARRIED_JOINT = "married_joint"

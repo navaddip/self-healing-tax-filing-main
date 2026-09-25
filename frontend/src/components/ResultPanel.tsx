@@ -138,17 +138,10 @@ export function ResultPanel({
         >
           <div className="filing-package">
             <div className="package-summary">
-              <span className={`chip ${reportEligible ? "ok" : "warn"}`}>
-                {reportEligible
-                  ? `${Math.round((v?.confidence_score ?? 0) * 100)}% Verified`
-                  : "Advisory Only"}
-              </span>
+
               {result.receipt && (
                 <dl className="package-facts">
-                  <div>
-                    <dt>Reference</dt>
-                    <dd>{result.receipt.reference_number}</dd>
-                  </div>
+
                   <div>
                     <dt>Channel</dt>
                     <dd>{result.receipt.filing_type || "json_self_file"}</dd>
@@ -223,7 +216,6 @@ export function ResultPanel({
                   <span aria-hidden="true">📋</span>
                   <span>
                     <strong>Audit Log</strong>
-                    <small>Agent-by-agent decision trail</small>
                   </span>
                 </a>
               )}
