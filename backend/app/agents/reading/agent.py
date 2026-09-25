@@ -32,6 +32,7 @@ from app.services.extraction.india.certificate_parsers import (
 )
 from app.services.extraction.india.form16_parser import Form16Parser
 from app.services.extraction.india.form26as_parser import Form26ASParser
+from app.services.ocr.azure_di_service import AzureDocumentIntelligenceService
 from app.services.ocr.service import OCRService
 from app.services.ollama.client import OllamaClient
 
@@ -45,6 +46,7 @@ class ReadingAgent:
         ocr: OCRService | None = None,
         memory: ChromaService | None = None,
         ollama: OllamaClient | None = None,
+        azure_di: AzureDocumentIntelligenceService | None = None,
         *args: Any,
         **kwargs: Any,
     ):
@@ -52,6 +54,7 @@ class ReadingAgent:
         self.ocr = ocr or OCRService()
         self.memory = memory
         self.ollama = ollama
+        self.azure_di = azure_di
 
         # Parsers
         self.form16_parser = Form16Parser()
@@ -161,6 +164,31 @@ class ReadingAgent:
 
         for page in pages:
             image_ocr = self.ocr.extract(page.image, page.embedded_text)
+
+            # For scanned pages (no embedded PDF text layer), also try Azure
+            # Document Intelligence in parallel and keep whichever result has
+            # higher confidence. Both pass through the same downstream
+            # cross-foot/evidence checks — neither engine's output is trusted
+            # just because it ran.
+            if not page.embedded_text and self.azure_di and self.azure_di.available:
+                tesseract_confidence = image_ocr.confidence
+                azure_ocr = self.azure_di.extract(page.image)
+                selected = azure_ocr if azure_ocr.confidence > tesseract_confidence else image_ocr
+                logs.append(
+                    AuditEntry(
+                        agent=self.name,
+                        action="ocr_engine_comparison",
+                        reason="Compared Tesseract and Azure Document Intelligence on a scanned page",
+                        details={
+                            "page": page.number,
+                            "tesseract_confidence": tesseract_confidence,
+                            "azure_di_confidence": azure_ocr.confidence,
+                            "selected_engine": selected.engine,
+                        },
+                    )
+                )
+                image_ocr = selected
+
             text = page.embedded_text or image_ocr.text
             page_texts.append(text)
             page_images.append(page.image)

@@ -12,6 +12,7 @@ from app.core.config import get_settings
 from app.services.documents.service import DocumentService
 from app.services.chroma.service import ChromaService
 from app.services.efile import get_backend
+from app.services.ocr.azure_di_service import AzureDocumentIntelligenceService
 from app.services.ocr.service import OCRService
 from app.services.ollama.client import OllamaClient
 from app.services.pdf.comparison_report import ProfessionalReportService
@@ -64,6 +65,11 @@ def get_workflow() -> TaxWorkflow:
             DocumentService(),
             OCRService(settings.tesseract_cmd),
             ollama=ollama if settings.enable_vision else None,
+            azure_di=AzureDocumentIntelligenceService(
+                settings.azure_di_endpoint, settings.azure_di_key
+            )
+            if settings.enable_azure_di
+            else None,
         ),
         income_service=IncomeComputationService(),
         old_calculator=OldRegimeCalculator(),

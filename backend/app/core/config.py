@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     form16_extractor: str = "label"
     enable_indexation_option: bool = True
     pan_masking: bool = True
+    enable_azure_di: bool = False
     azure_di_endpoint: str = ""
     azure_di_key: str = ""
     tesseract_cmd: str | None = None
